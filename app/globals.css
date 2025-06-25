@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 13% 9%;
+    --foreground: 220 13% 91%;
+    --card: 220 13% 12%;
+    --card-foreground: 220 13% 91%;
+    --popover: 220 13% 9%;
+    --popover-foreground: 220 13% 91%;
+    --primary: 220 13% 91%;
+    --primary-foreground: 220 13% 9%;
+    --secondary: 220 13% 15%;
+    --secondary-foreground: 220 13% 91%;
+    --muted: 220 13% 15%;
+    --muted-foreground: 220 13% 63%;
+    --accent: 220 13% 15%;
+    --accent-foreground: 220 13% 91%;
+    --destructive: 0 62% 30%;
+    --destructive-foreground: 220 13% 91%;
+    --border: 220 13% 18%;
+    --input: 220 13% 18%;
+    --ring: 220 13% 91%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Custom neon effects */
+.neon-glow {
+  filter: drop-shadow(0 0 10px currentColor);
+}
+
+.neon-border {
+  border: 1px solid currentColor;
+  box-shadow: 0 0 10px currentColor;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #2c2c2c;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #404040;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #00ffff;
+}
+
+/* Custom animations */
+@keyframes neon-flicker {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+.neon-flicker {
+  animation: neon-flicker 2s infinite;
+}

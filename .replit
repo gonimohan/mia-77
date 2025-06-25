@@ -1,0 +1,38 @@
+modules = ["nodejs-20", "python-3.12", "web", "bash"]
+run = "npm run dev"
+
+[nix]
+channel = "stable-24_05"
+packages = ["glibcLocales"]
+
+[deployment]
+run = ["sh", "-c", "npm run dev"]
+
+[[ports]]
+localPort = 3000
+externalPort = 80
+
+[workflows]
+runButton = "Full Stack"
+
+[[workflows.workflow]]
+name = "Start Backend"
+author = 43055491
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd api && python main.py"
+
+[[workflows.workflow]]
+name = "Full Stack"
+author = 43055491
+mode = "parallel"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm run dev"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd api && python main.py"
