@@ -1,4 +1,3 @@
-
 import os
 from supabase import create_client, Client
 from typing import Optional, Dict, Any, List
@@ -17,13 +16,16 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 _supabase_client: Optional[Client] = None
 
+
 def connect_to_supabase():
     """Initializes the Supabase client."""
     global _supabase_client
     if _supabase_client is None:
         if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-            raise ValueError("Missing Supabase configuration. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.")
-        
+            raise ValueError(
+                "Missing Supabase configuration. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables."
+            )
+
         try:
             print(f"Connecting to Supabase at {SUPABASE_URL}")
             _supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -32,11 +34,13 @@ def connect_to_supabase():
             logger.error(f"Failed to connect to Supabase: {e}")
             raise
 
+
 def get_supabase_client() -> Client:
     """Returns the Supabase client. Connects if not already connected."""
     if _supabase_client is None:
         connect_to_supabase()
     return _supabase_client
+
 
 def insert_document(data: Dict[str, Any], table_name: str = "documents") -> Optional[str]:
     """
@@ -47,11 +51,12 @@ def insert_document(data: Dict[str, Any], table_name: str = "documents") -> Opti
         client = get_supabase_client()
         result = client.table(table_name).insert(data).execute()
         if result.data:
-            return result.data[0].get('id')
+            return result.data[0].get("id")
         return None
     except Exception as e:
         logger.error(f"Error inserting document: {e}")
         return None
+
 
 def get_document_by_id(document_id: str, table_name: str = "documents") -> Optional[Dict[str, Any]]:
     """
@@ -68,6 +73,7 @@ def get_document_by_id(document_id: str, table_name: str = "documents") -> Optio
         logger.error(f"Error retrieving document: {e}")
         return None
 
+
 def update_document_by_id(document_id: str, updates: Dict[str, Any], table_name: str = "documents") -> bool:
     """
     Updates a document by its ID in the specified table.
@@ -80,6 +86,7 @@ def update_document_by_id(document_id: str, updates: Dict[str, Any], table_name:
     except Exception as e:
         logger.error(f"Error updating document: {e}")
         return False
+
 
 def delete_document_by_id(document_id: str, table_name: str = "documents") -> bool:
     """
@@ -94,6 +101,7 @@ def delete_document_by_id(document_id: str, table_name: str = "documents") -> bo
         logger.error(f"Error deleting document: {e}")
         return False
 
+
 def get_documents_by_user_id(user_id: str, table_name: str = "documents") -> List[Dict[str, Any]]:
     """
     Retrieves all documents for a specific user from the specified table.
@@ -106,6 +114,7 @@ def get_documents_by_user_id(user_id: str, table_name: str = "documents") -> Lis
     except Exception as e:
         logger.error(f"Error retrieving documents for user: {e}")
         return []
+
 
 def get_documents_by_status(status: str, table_name: str = "documents") -> List[Dict[str, Any]]:
     """
@@ -120,61 +129,74 @@ def get_documents_by_status(status: str, table_name: str = "documents") -> List[
         logger.error(f"Error retrieving documents by status: {e}")
         return []
 
+
 # Market Intelligence specific functions
 def insert_report(data: Dict[str, Any]) -> Optional[str]:
     """Insert a new market analysis report."""
     return insert_document(data, "reports")
 
+
 def get_report_by_id(report_id: str) -> Optional[Dict[str, Any]]:
     """Get a market analysis report by ID."""
     return get_document_by_id(report_id, "reports")
+
 
 def update_report_by_id(report_id: str, updates: Dict[str, Any]) -> bool:
     """Update a market analysis report by ID."""
     return update_document_by_id(report_id, updates, "reports")
 
+
 def get_reports_by_user_id(user_id: str) -> List[Dict[str, Any]]:
     """Get all reports for a specific user."""
     return get_documents_by_user_id(user_id, "reports")
+
 
 def insert_data_source(data: Dict[str, Any]) -> Optional[str]:
     """Insert a new data source configuration."""
     return insert_document(data, "data_sources")
 
+
 def get_data_sources_by_user_id(user_id: str) -> List[Dict[str, Any]]:
     """Get all data sources for a specific user."""
     return get_documents_by_user_id(user_id, "data_sources")
+
 
 def insert_kpi_metric(data: Dict[str, Any]) -> Optional[str]:
     """Insert a new KPI metric."""
     return insert_document(data, "kpi_metrics")
 
+
 def get_kpi_metrics_by_user_id(user_id: str) -> List[Dict[str, Any]]:
     """Get all KPI metrics for a specific user."""
     return get_documents_by_user_id(user_id, "kpi_metrics")
+
 
 def insert_market_trend(data: Dict[str, Any]) -> Optional[str]:
     """Insert a new market trend."""
     return insert_document(data, "market_trends")
 
+
 def get_market_trends_by_user_id(user_id: str) -> List[Dict[str, Any]]:
     """Get all market trends for a specific user."""
     return get_documents_by_user_id(user_id, "market_trends")
+
 
 def insert_competitor(data: Dict[str, Any]) -> Optional[str]:
     """Insert a new competitor analysis."""
     return insert_document(data, "competitors")
 
+
 def get_competitors_by_user_id(user_id: str) -> List[Dict[str, Any]]:
     """Get all competitors for a specific user."""
     return get_documents_by_user_id(user_id, "competitors")
+
 
 # Example usage and testing
 if __name__ == "__main__":
     try:
         connect_to_supabase()
         print("Supabase connection test successful!")
-        
+
         # Example: Test inserting a document
         # test_doc = {
         #     "filename": "test.txt",
@@ -184,6 +206,6 @@ if __name__ == "__main__":
         # }
         # doc_id = insert_document(test_doc)
         # print(f"Inserted document with ID: {doc_id}")
-        
+
     except Exception as e:
         logger.error(f"Connection test failed: {e}")
