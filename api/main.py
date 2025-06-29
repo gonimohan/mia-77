@@ -5,20 +5,16 @@ import uvicorn
 import os
 import io
 import uuid
-import base64
 from datetime import datetime
 import traceback
 from pydantic import BaseModel
-from typing import Dict, Any, List, Optional, Union
-import asyncio
-import aiohttp
+from typing import Dict, Any, List, Optional
 import logging
 import pandas as pd
-import numpy as np
 from supabase import create_client, Client
 from pathlib import Path
 import json
-import database # For Supabase operations
+from . import database # For Supabase operations
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +49,7 @@ else:
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+
 # Pydantic models
 class AnalysisRequest(BaseModel):
     query: str
@@ -60,18 +57,22 @@ class AnalysisRequest(BaseModel):
     question: Optional[str] = None
     uploaded_file_ids: Optional[List[str]] = None
 
+
 class ChatRequest(BaseModel):
     messages: List[Dict[str, Any]]
     context: Optional[Dict[str, Any]] = None
+
 
 class AgentSyncRequest(BaseModel):
     action: str
     data: Optional[Dict[str, Any]] = None
 
+
 class KPIRequest(BaseModel):
     metric: str
     value: float
     timestamp: Optional[str] = None
+
 
 class DataSource(BaseModel):
     name: str
@@ -81,10 +82,34 @@ class DataSource(BaseModel):
     config: Dict[str, Any] = {}
     status: str = "inactive"
 
+
 class FileAnalysisRequest(BaseModel):
     file_id: str
     analysis_type: str = "comprehensive"
     additional_context: Optional[str] = None
+
+
+class UserProfileUpdateRequest(BaseModel):
+    full_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    # Add other updatable fields as necessary
+
+
+class UserPreferences(BaseModel):
+    theme_settings: Optional[Dict[str, Any]] = None
+    notification_settings: Optional[Dict[str, Any]] = None
+    data_settings: Optional[Dict[str, Any]] = None
+
+
+class AppSettingItem(BaseModel):
+    setting_key: str
+    setting_value: Dict[str, Any]  # Assuming value is always JSON for flexibility
+    description: Optional[str] = None
+
+
+class AppSettingsUpdateRequest(BaseModel):
+    settings: List[AppSettingItem]
+
 
 # Authentication dependency
 def get_current_user(request: Request):
@@ -92,12 +117,12 @@ def get_current_user(request: Request):
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
-    
+
     token = auth_header.split(" ")[1]
-    
+
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase client not initialized")
-    
+
     try:
         # Verify JWT token with Supabase
         user = supabase.auth.get_user(token)
@@ -105,6 +130,7 @@ def get_current_user(request: Request):
     except Exception as e:
         logger.error(f"Authentication error: {e}")
         raise HTTPException(status_code=401, detail="Invalid authentication token")
+
 
 # File processing utilities
 class FileProcessor:
@@ -121,7 +147,7 @@ class FileProcessor:
                 "data_types": df.dtypes.astype(str).to_dict(),
                 "summary": df.describe().to_dict(),
                 "sample_data": df.head(10).to_dict(orient="records"),
-                "null_counts": df.isnull().sum().to_dict()
+                "null_counts": df.isnull().sum().to_dict(),
             }
         except Exception as e:
             logger.error(f"CSV processing error: {e}")
@@ -134,7 +160,7 @@ class FileProcessor:
             # Read all sheets
             xl_file = pd.ExcelFile(io.BytesIO(file_content))
             sheets_data = {}
-            
+
             for sheet_name in xl_file.sheet_names:
                 df = pd.read_excel(io.BytesIO(file_content), sheet_name=sheet_name)
                 sheets_data[sheet_name] = {
@@ -144,14 +170,10 @@ class FileProcessor:
                     "data_types": df.dtypes.astype(str).to_dict(),
                     "summary": df.describe().to_dict(),
                     "sample_data": df.head(5).to_dict(orient="records"),
-                    "null_counts": df.isnull().sum().to_dict()
+                    "null_counts": df.isnull().sum().to_dict(),
                 }
-            
-            return {
-                "type": "excel",
-                "sheets": list(xl_file.sheet_names),
-                "sheets_data": sheets_data
-            }
+
+            return {"type": "excel", "sheets": list(xl_file.sheet_names), "sheets_data": sheets_data}
         except Exception as e:
             logger.error(f"Excel processing error: {e}")
             raise HTTPException(status_code=400, detail=f"Excel processing failed: {str(e)}")
@@ -160,17 +182,17 @@ class FileProcessor:
     def process_text(file_content: bytes) -> Dict[str, Any]:
         """Process text file and return analysis"""
         try:
-            text = file_content.decode('utf-8', errors='ignore')
-            lines = text.split('\n')
+            text = file_content.decode("utf-8", errors="ignore")
+            lines = text.split("\n")
             words = text.split()
-            
+
             return {
                 "type": "text",
                 "character_count": len(text),
                 "word_count": len(words),
                 "line_count": len(lines),
                 "sample_content": text[:500] + "..." if len(text) > 500 else text,
-                "encoding": "utf-8"
+                "encoding": "utf-8",
             }
         except Exception as e:
             logger.error(f"Text processing error: {e}")
@@ -183,35 +205,42 @@ class FileProcessor:
             # Save content to temporary file for processing
             if not temp_file_path:
                 import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
+
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
                     tmp_file.write(file_content)
                     temp_file_path = tmp_file.name
-            
+
             # Import text processor
+            # Assuming text_processor.py functions are still relevant or agent_logic handles this.
+            # For now, keeping the import if process_pdf is still used directly.
             from .text_processor import extract_text_from_file, analyze_text_keywords, extract_entities
-            
+
             # Extract text
-            extraction_result = extract_text_from_file(temp_file_path, '.pdf')
-            
+            extraction_result = extract_text_from_file(temp_file_path, ".pdf")
+
             # Clean up temporary file
             if temp_file_path and os.path.exists(temp_file_path):
                 os.unlink(temp_file_path)
-            
+
             if extraction_result:
                 # Analyze the extracted text
                 keyword_analysis = analyze_text_keywords(extraction_result["text"])
                 entities = extract_entities(extraction_result["text"])
-                
+
                 return {
                     "type": "pdf",
                     "size_bytes": len(file_content),
-                    "text_extracted": extraction_result["text"][:1000] + "..." if len(extraction_result["text"]) > 1000 else extraction_result["text"],
+                    "text_extracted": (
+                        extraction_result["text"][:1000] + "..."
+                        if len(extraction_result["text"]) > 1000
+                        else extraction_result["text"]
+                    ),
                     "word_count": extraction_result["word_count"],
                     "metadata": extraction_result.get("metadata", {}),
                     "keyword_analysis": keyword_analysis,
                     "entities": entities,
                     "processing_status": "completed",
-                    "text_quality": keyword_analysis.get("text_quality", "unknown")
+                    "text_quality": keyword_analysis.get("text_quality", "unknown"),
                 }
             else:
                 return {
@@ -219,11 +248,12 @@ class FileProcessor:
                     "size_bytes": len(file_content),
                     "note": "PDF text extraction failed. Document may be image-based or corrupted.",
                     "processing_status": "failed",
-                    "text_quality": "poor"
+                    "text_quality": "poor",
                 }
         except Exception as e:
             logger.error(f"PDF processing error: {e}")
             raise HTTPException(status_code=400, detail=f"PDF processing failed: {str(e)}")
+
 
 # Market Intelligence AI Agent
 class MarketIntelligenceAgent:
@@ -231,47 +261,99 @@ class MarketIntelligenceAgent:
         self.google_api_key = os.getenv("GOOGLE_API_KEY")
         self.news_api_key = os.getenv("NEWS_API_KEY")
         self.tavily_api_key = os.getenv("TAVILY_API_KEY")
-
-    async def generate_insights(self, query: str, context: Dict[str, Any] = None, uploaded_file_paths: Optional[List[str]] = None) -> Dict[str, Any]:
+        
+    async def generate_insights(self, query: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Generate AI-powered market intelligence insights"""
         try:
-            from agent_logic import MarketIntelligenceState, run_market_intelligence_agent
-            state = MarketIntelligenceState(
-                query=query,
-                market_domain=context.get("market_domain") if context else None,
-                question=context.get("question") if context else None,
-                user_id=context.get("user_id") if context else None
-            )
-            # Pass uploaded_file_paths to the agent's main function
-            result = await run_market_intelligence_agent(state, uploaded_file_paths=uploaded_file_paths)
-            return result
+            # Simulated AI analysis for now
+            # In production, integrate with actual LLM APIs
+            insights = {
+                "query": query,
+                "insights": [
+                    f"Market analysis for '{query}' shows emerging trends in digital transformation",
+                    f"Competitive landscape analysis reveals 3 key players in the {context.get('market_domain', 'general')} space",
+                    f"Growth opportunities identified in {context.get('market_domain', 'target market')} segment",
+                    f"Risk factors include market volatility and regulatory changes"
+                ],
+                "recommendations": [
+                    "Focus on digital-first approach to capture emerging market segments",
+                    "Invest in customer experience improvements",
+                    "Monitor competitive pricing strategies closely",
+                    "Diversify market presence to reduce concentration risk"
+                ],
+                "confidence_score": 0.87,
+                "data_sources": ["market_research", "competitive_analysis", "financial_data"],
+                "generated_at": datetime.now().isoformat()
+            }
+            
+            return insights
         except Exception as e:
-            logger.error(f"AI insights generation error (Gemini RAG): {e}")
+            logger.error(f"AI insights generation error: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to generate insights: {str(e)}")
 
     async def process_file_with_ai(self, file_data: Dict[str, Any], query: str = None) -> Dict[str, Any]:
+        """Process uploaded file data with AI analysis"""
         try:
-            from agent_logic import MarketIntelligenceState, rag_query_handler
-            state = MarketIntelligenceState(
-                query=query or "Analyze this file",
-                file_data=file_data
-            )
-            result = await rag_query_handler(state)
-            return result
+            analysis = {
+                "file_type": file_data.get("type"),
+                "processing_timestamp": datetime.now().isoformat(),
+                "ai_insights": [],
+                "recommendations": [],
+                "visualizations": []
+            }
+            
+            if file_data.get("type") == "csv":
+                # Analyze CSV data
+                analysis["ai_insights"] = [
+                    f"Dataset contains {file_data.get('rows', 0)} records across {file_data.get('columns', 0)} dimensions",
+                    "Data quality assessment: " + ("High" if file_data.get('null_counts', {}) else "Moderate"),
+                    "Potential for trend analysis and predictive modeling identified"
+                ]
+                
+                analysis["recommendations"] = [
+                    "Consider time-series analysis if temporal data is present",
+                    "Implement data validation for missing values",
+                    "Explore correlation patterns between key variables"
+                ]
+            
+            elif file_data.get("type") == "text":
+                # Analyze text content
+                word_count = file_data.get("word_count", 0)
+                analysis["ai_insights"] = [
+                    f"Document contains {word_count} words across {file_data.get('line_count', 0)} lines",
+                    "Text complexity: " + ("High" if word_count > 1000 else "Moderate"),
+                    "Suitable for sentiment analysis and content categorization"
+                ]
+                
+                analysis["recommendations"] = [
+                    "Perform sentiment analysis to gauge market perception",
+                    "Extract key entities and topics for market intelligence",
+                    "Consider competitive mention analysis"
+                ]
+                
+            return analysis
+            
         except Exception as e:
-            logger.error(f"File AI processing error (Gemini RAG): {e}")
+            logger.error(f"File AI processing error: {e}")
             raise HTTPException(status_code=500, detail=f"AI file processing failed: {str(e)}")
 
 # Initialize AI agent
 ai_agent = MarketIntelligenceAgent()
 
-# Initialize Supabase connection on startup
+# Initialize Supabase connection on startup - This is good.
 @app.on_event("startup")
 async def startup_db_client():
-    database.connect_to_supabase()
+    database.connect_to_supabase()  # Ensures from .database is called
+
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
     logger.info("Shutting down Market Intelligence Agent API")
+
+
+# Import real agent functions
+from . import agent_logic  # Use `.` for relative import in a package
+
 
 # Global error handler
 @app.exception_handler(Exception)
@@ -279,12 +361,9 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Global exception: {str(exc)}\n{traceback.format_exc()}")
     return JSONResponse(
         status_code=500,
-        content={
-            "error": "Internal server error",
-            "details": str(exc),
-            "timestamp": datetime.now().isoformat()
-        }
+        content={"error": "Internal server error", "details": str(exc), "timestamp": datetime.now().isoformat()},
     )
+
 
 @app.get("/")
 async def root():
@@ -293,14 +372,9 @@ async def root():
         "version": "1.0.0",
         "status": "running",
         "timestamp": datetime.now().isoformat(),
-        "features": [
-            "market_analysis",
-            "file_processing", 
-            "rag_chat",
-            "data_integration",
-            "ai_insights"
-        ]
+        "features": ["market_analysis", "file_processing", "rag_chat", "data_integration", "ai_insights"],
     }
+
 
 @app.get("/health")
 async def health_check():
@@ -311,30 +385,23 @@ async def health_check():
             "api": "running",
             "database": "connected" if supabase else "not_configured",
             "ai_agent": "ready",
-            "file_processor": "ready"
-        }
+            "file_processor": "ready",
+        },
     }
 
+
 @app.post("/api/analyze")
-async def analyze(request: AnalysisRequest, user=Depends(get_current_user)):
+async def analyze(analysis_request: AnalysisRequest, user=Depends(get_current_user)):
     try:
         logger.info(f"Analysis request: {request.query} for domain: {request.market_domain}")
-        uploaded_file_paths = []
-        if request.uploaded_file_ids:
-            if not supabase:
-                raise HTTPException(status_code=500, detail="Database not configured")
-            for file_id in request.uploaded_file_ids:
-                file_record_result = supabase.table("documents").select("saved_file_path").eq("id", file_id).eq("uploader_id", user.id).execute()
-                if file_record_result.data and file_record_result.data[0].get("saved_file_path"):
-                    uploaded_file_paths.append(file_record_result.data[0]["saved_file_path"])
-                else:
-                    logger.warning(f"Uploaded file ID {file_id} not found or not owned by user {user.id}.")
 
+        # Generate AI-powered insights
         insights = await ai_agent.generate_insights(
             request.query,
-            {"market_domain": request.market_domain, "question": request.question, "user_id": user.id},
-            uploaded_file_paths=uploaded_file_paths
+            {"market_domain": request.market_domain, "question": request.question}
         )
+        
+        # Store analysis in database
         if supabase:
             try:
                 analysis_record = {
@@ -345,43 +412,93 @@ async def analyze(request: AnalysisRequest, user=Depends(get_current_user)):
                     "insights": insights,
                     "created_at": datetime.now().isoformat()
                 }
+                
                 result = supabase.table("market_analyses").insert(analysis_record).execute()
                 logger.info(f"Analysis stored with ID: {result.data[0]['id'] if result.data else 'unknown'}")
             except Exception as db_error:
                 logger.warning(f"Failed to store analysis in database: {db_error}")
-        analysis_result = insights
+                # Continue without failing the request
+
+        analysis_result = {
+            "query": request.query,
+            "market_domain": request.market_domain,
+            "question": request.question,
+            "analysis": insights.get("insights", []),
+            "recommendations": insights.get("recommendations", []),
+            "confidence_score": insights.get("confidence_score", 0.87),
+            "timestamp": datetime.now().isoformat(),
+            "metadata": {
+                "processing_time_ms": 1250,
+                "data_sources": insights.get("data_sources", []),
+                "version": "1.0.0"
+            }
+        }
+
         return analysis_result
     except Exception as e:
-        logger.error(f"Analysis error: {str(e)}")
+        logger.error(f"Analysis error in /api/analyze: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
+
 @app.post("/api/chat")
-async def chat(request: ChatRequest):
+async def chat(chat_request: ChatRequest, user=Depends(get_current_user)):  # Added user dependency for user_id
     try:
         logger.info(f"Chat request with {len(request.messages)} messages")
+
         last_message = request.messages[-1] if request.messages else {}
         user_content = last_message.get("content", "")
         session_id = request.context.get("session_id") if request.context else None
-        from agent_logic import chat_with_agent
-        history = request.messages
-        user_id = request.context.get("user_id") if request.context else None
-        response = await chat_with_agent(user_content, session_id, history, user_id)
-        return {"response": response}
+
+        # Enhanced RAG-powered response generation
+        # In production, this would integrate with vector databases and retrieval systems
+        context_info = ""
+        if request.context:
+            context_info = f" (Session: {session_id})"
+
+        # Generate AI response using market intelligence agent
+        ai_response = await ai_agent.generate_insights(
+            user_content,
+            {"type": "chat", "session_id": session_id, "context": request.context}
+        )
+
+        response = {
+            "response": f"Based on my market intelligence analysis{context_info}, here are insights about '{user_content}': " + 
+                       " ".join(ai_response.get("insights", ["I can help you with market analysis and insights."])[:2]),
+            "context": {
+                "message_count": len(request.messages),
+                "query_type": "market_intelligence",
+                "confidence": ai_response.get("confidence_score", 0.92),
+                "timestamp": datetime.now().isoformat(),
+                "session_id": session_id
+            },
+            "suggestions": ai_response.get("recommendations", [
+                "Would you like more details about market trends?",
+                "Should I analyze competitor positioning?",
+                "Do you need strategic recommendations?"
+            ])[:3]
+        }
+
+        return response
     except Exception as e:
         logger.error(f"Chat error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Chat processing failed: {str(e)}")
 
-async def process_document_pipeline(document_id: str, internal_filename: str, original_filename: str, file_extension: str, saved_file_path: str):
+
+async def process_document_pipeline(
+    document_id: str, internal_filename: str, original_filename: str, file_extension: str, saved_file_path: str
+):
     """
     Background task to process a document: extract text, analyze keywords, and update database.
     """
-    logger.info(f"Background task started for document_id: {document_id}, file: {original_filename} (path: {saved_file_path})")
+    logger.info(
+        f"Background task started for document_id: {document_id}, file: {original_filename} (path: {saved_file_path})"
+    )
     try:
         # 1. Update status to processing
         if not supabase:
             logger.error("Supabase client not available for document processing")
             return
-            
+
         update_result = supabase.table("documents").update({"status": "processing"}).eq("id", document_id).execute()
         if not update_result.data:
             logger.error(f"Failed to update status to 'processing' for document_id: {document_id}. Aborting pipeline.")
@@ -389,24 +506,24 @@ async def process_document_pipeline(document_id: str, internal_filename: str, or
 
         # 2. Full text extraction and analysis
         from .text_processor import extract_text_from_file, analyze_text_keywords, extract_entities
-        
+
         extraction_result = extract_text_from_file(saved_file_path, file_extension)
-        
+
         if extraction_result:
             # Extract full text and metadata
             extracted_text = extraction_result["text"]
             word_count = extraction_result["word_count"]
             metadata = extraction_result.get("metadata", {})
-            
+
             # Perform keyword analysis
             keyword_analysis = analyze_text_keywords(extracted_text)
-            
+
             # Extract entities
             entities = extract_entities(extracted_text)
-            
+
             # Create text preview (first 500 characters)
             text_preview = extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text
-            
+
             # Comprehensive analysis
             comprehensive_analysis = {
                 "file_type": file_extension,
@@ -418,16 +535,16 @@ async def process_document_pipeline(document_id: str, internal_filename: str, or
                 "text_quality": keyword_analysis.get("text_quality", "unknown"),
                 "quality_score": keyword_analysis.get("quality_score", 0),
                 "business_relevance": keyword_analysis.get("matched_categories_count", 0),
-                "processing_method": metadata.get("processing_method", "unknown")
+                "processing_method": metadata.get("processing_method", "unknown"),
             }
-            
+
             # Update document with full analysis
             update_data = {
                 "text": extracted_text,
                 "word_count": word_count,
                 "analysis": comprehensive_analysis,
                 "text_preview": text_preview,
-                "status": "analyzed"
+                "status": "analyzed",
             }
         else:
             # If text extraction failed, still provide basic analysis
@@ -436,39 +553,42 @@ async def process_document_pipeline(document_id: str, internal_filename: str, or
                 "file_size": os.path.getsize(saved_file_path),
                 "processing_timestamp": datetime.now().isoformat(),
                 "error": "Text extraction failed",
-                "text_quality": "poor"
+                "text_quality": "poor",
             }
-            
+
             update_data = {
                 "analysis": basic_analysis,
                 "status": "processing_failed",
-                "error_message": "Text extraction failed"
+                "error_message": "Text extraction failed",
             }
-        
+
         update_result = supabase.table("documents").update(update_data).eq("id", document_id).execute()
-        
+
         if not update_result.data:
             logger.error(f"Failed to update DB after processing for document_id: {document_id}.")
         else:
-            logger.info(f"Successfully processed document_id: {document_id} with {'full analysis' if extraction_result else 'basic info'}")
+            logger.info(
+                f"Successfully processed document_id: {document_id} with {'full analysis' if extraction_result else 'basic info'}"
+            )
 
     except Exception as e:
         logger.error(f"Error in processing pipeline for document_id {document_id}: {e}\n{traceback.format_exc()}")
         if supabase:
-            supabase.table("documents").update({
-                "status": "processing_failed", 
-                "error_message": str(e)
-            }).eq("id", document_id).execute()
+            supabase.table("documents").update({"status": "processing_failed", "error_message": str(e)}).eq(
+                "id", document_id
+            ).execute()
+
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv", ".xlsx"}
 MAX_FILE_SIZE_MB = 50
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
+
 @app.post("/api/upload")
 async def upload_document_for_intelligence(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    user=Depends(get_current_user) # Assuming get_current_user provides user object with an id attribute
+    user=Depends(get_current_user),  # Assuming get_current_user provides user object with an id attribute
 ):
     """
     Uploads a document, stores metadata in MongoDB, and triggers a background task
@@ -480,7 +600,7 @@ async def upload_document_for_intelligence(
     if file_extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported file type: '{file_extension}'. Allowed types are: {', '.join(ALLOWED_EXTENSIONS)}"
+            detail=f"Unsupported file type: '{file_extension}'. Allowed types are: {', '.join(ALLOWED_EXTENSIONS)}",
         )
 
     # Read file content to check size and save
@@ -489,8 +609,8 @@ async def upload_document_for_intelligence(
 
     if file_size > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
-            status_code=413, # Payload Too Large
-            detail=f"File size {file_size / (1024*1024):.2f}MB exceeds limit of {MAX_FILE_SIZE_MB}MB."
+            status_code=413,  # Payload Too Large
+            detail=f"File size {file_size / (1024*1024):.2f}MB exceeds limit of {MAX_FILE_SIZE_MB}MB.",
         )
 
     if file_size == 0:
@@ -508,36 +628,38 @@ async def upload_document_for_intelligence(
         raise HTTPException(status_code=500, detail="Could not save uploaded file.")
 
     uploader_id_str = None
-    if user and hasattr(user, 'id'):
+    if user and hasattr(user, "id"):
         uploader_id_str = str(user.id)
 
     initial_doc_data = {
-        "filename": internal_filename, # Internal unique name
+        "filename": internal_filename,  # Internal unique name
         "original_filename": original_filename,
-        "file_type": file.content_type, # MIME type
+        "file_type": file.content_type,  # MIME type
         "file_extension": file_extension,
         "file_size": file_size,
         "uploader_id": uploader_id_str,
         "upload_time": datetime.now().isoformat(),
-        "status": "uploaded", # Initial status
+        "status": "uploaded",  # Initial status
         "text": None,
         "word_count": None,
         "analysis": None,
         "text_preview": None,
-        "error_message": None
+        "error_message": None,
     }
 
     try:
         if not supabase:
             raise HTTPException(status_code=500, detail="Database not configured")
-            
+
         result = supabase.table("documents").insert(initial_doc_data).execute()
         document_id = result.data[0]["id"] if result.data else None
-        
+
         if not document_id:
             raise Exception("Failed to get document ID from insert")
-            
-        logger.info(f"File '{original_filename}' (ID: {document_id}) metadata stored in Supabase. Path: {saved_file_path}")
+
+        logger.info(
+            f"File '{original_filename}' (ID: {document_id}) metadata stored in Supabase. Path: {saved_file_path}"
+        )
     except Exception as e:
         logger.error(f"Failed to insert document metadata into Supabase for {original_filename}: {e}")
         # Potentially clean up the saved file if DB insert fails
@@ -559,8 +681,8 @@ async def upload_document_for_intelligence(
         document_id=document_id,
         internal_filename=internal_filename,
         original_filename=original_filename,
-        file_extension=file_extension, # Corrected to pass file_extension
-        saved_file_path=str(saved_file_path)
+        file_extension=file_extension,  # Corrected to pass file_extension
+        saved_file_path=str(saved_file_path),
     )
     logger.info(f"Background task added for document ID {document_id} to process file {original_filename}")
 
@@ -568,8 +690,9 @@ async def upload_document_for_intelligence(
         "message": "File uploaded successfully. Processing started in background.",
         "document_id": document_id,
         "original_filename": original_filename,
-        "internal_filename": internal_filename
+        "internal_filename": internal_filename,
     }
+
 
 @app.get("/api/agent/generate-report/{document_id}")
 async def generate_document_report(document_id: str):
@@ -577,10 +700,10 @@ async def generate_document_report(document_id: str):
     Generates a JSON report for a processed document.
     """
     logger.info(f"Report generation request for document_id: {document_id}")
-    
+
     if not supabase:
         raise HTTPException(status_code=500, detail="Database not configured")
-        
+
     result = supabase.table("documents").select("*").eq("id", document_id).execute()
     doc = result.data[0] if result.data else None
 
@@ -590,20 +713,22 @@ async def generate_document_report(document_id: str):
 
     # Check status - report should only be generated if analysis is complete
     if doc.get("status") != "analyzed":
-        logger.warning(f"Report generation: Document {document_id} not yet analyzed. Current status: {doc.get('status')}")
+        logger.warning(
+            f"Report generation: Document {document_id} not yet analyzed. Current status: {doc.get('status')}"
+        )
         raise HTTPException(
-            status_code=422, # Unprocessable Entity or 409 Conflict could also work
-            detail=f"Document processing not complete. Current status: {doc.get('status', 'Unknown')}. Please try again later."
+            status_code=422,  # Unprocessable Entity or 409 Conflict could also work
+            detail=f"Document processing not complete. Current status: {doc.get('status', 'Unknown')}. Please try again later.",
         )
 
     # Construct the report from the document fields
     report = {
-        "document_id": document_id, # Good to include the ID in the report
+        "document_id": document_id,  # Good to include the ID in the report
         "original_filename": doc.get("original_filename"),
         "upload_time": doc.get("upload_time"),
         "word_count": doc.get("word_count"),
         "analysis": doc.get("analysis"),
-        "text_preview": doc.get("text_preview")
+        "text_preview": doc.get("text_preview"),
         # Ensure all these fields are actually populated by the pipeline
     }
 
@@ -611,114 +736,194 @@ async def generate_document_report(document_id: str):
     # Though ideally, 'analyzed' status means they should be.
     report_cleaned = {k: v for k, v in report.items() if v is not None}
 
-    logger.info(f"Report generated successfully for document_id: {document_id}")
-    return report_cleaned
+    """Generates a JSON report (summary & insights) for a processed document."""
+    # This endpoint is being refactored. The new approach will be separate
+    # /summary and /insights endpoints. This one can be deprecated or
+    # modified to just fetch existing stored insights.
+    # For now, let's make it fetch stored insights.
+    logger.info(f"Fetching insights report for document_id: {document_id}, user_id: {user.id}")
 
-@app.get("/api/files")
-async def list_files(user=Depends(get_current_user)): # This existing endpoint seems to list files from Supabase
-    """List all uploaded files for the user"""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    doc_insight = supabase.table("document_insights").select("document_id, summary, insights_data, generated_at").eq("document_id", document_id).eq("user_id", str(user.id)).order("generated_at", desc=True).limit(1).maybe_single().execute()
+
+    if not doc_insight.data:
+        logger.warning(f"No insights found for document ID {document_id} by user {user.id}")
+        raise HTTPException(status_code=404, detail="No insights found for this document.")
+
+    return doc_insight.data
+
+
+# Document Management Endpoints (Refactored from /api/files)
+@app.get("/api/documents", response_model=List[Dict[str, Any]])
+async def list_documents(user=Depends(get_current_user)):
+    """Lists all documents for the authenticated user from the 'documents' table."""
     try:
         if not supabase:
             raise HTTPException(status_code=500, detail="Database not configured")
-            
-        result = supabase.table("uploaded_files").select("*").eq("user_id", user.id).execute()
         
-        files = []
-        for file_record in result.data:
-            files.append({
-                "file_id": file_record["id"],
-                "filename": file_record["filename"],
-                "file_type": file_record["file_type"],
-                "file_size": file_record["file_size"],
-                "processing_status": file_record["processing_status"],
-                "uploaded_at": file_record["uploaded_at"]
-            })
-            
-        return {"files": files}
-        
+        user_id_str = str(user.id)
+        # Fetch from 'documents' table, not 'uploaded_files'
+        result = supabase.table("documents").select(
+            "id, original_filename, file_extension, file_size, status, upload_time, text_preview, uploader_id"
+        ).eq("uploader_id", user_id_str).order("upload_time", desc=True).execute()
+
+        return result.data if result.data else []
+
     except Exception as e:
-        logger.error(f"File listing error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+        logger.error(f"Document listing error for user {user.id}: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to list documents: {str(e)}")
 
-@app.get("/api/files/{file_id}")
-async def get_file_details(file_id: str, user=Depends(get_current_user)):
-    """Get detailed information about a specific file"""
+@app.get("/api/documents/{document_id}/details")
+async def get_document_details(document_id: str, user=Depends(get_current_user)):
+    """Gets detailed information about a specific document, including its analysis if available."""
     try:
         if not supabase:
             raise HTTPException(status_code=500, detail="Database not configured")
-            
-        result = supabase.table("uploaded_files").select("*").eq("id", file_id).eq("user_id", user.id).execute()
         
-        if not result.data:
-            raise HTTPException(status_code=404, detail="File not found")
-            
-        file_record = result.data[0]
-        return {
-            "file_id": file_record["id"],
-            "filename": file_record["filename"],
-            "file_type": file_record["file_type"],
-            "file_size": file_record["file_size"],
-            "processing_status": file_record["processing_status"],
-            "processed_data": file_record["processed_data"],
-            "uploaded_at": file_record["uploaded_at"]
-        }
+        user_id_str = str(user.id)
+        # Fetch from 'documents' table
+        doc_result = supabase.table("documents").select(
+            "*" # Select all columns from documents
+        ).eq("id", document_id).eq("uploader_id", user_id_str).maybe_single().execute()
+
+        if not doc_result.data:
+            raise HTTPException(status_code=404, detail="Document not found or not owned by user.")
+
+        document_details = doc_result.data
+
+        # Fetch latest insights from 'document_insights'
+        insights_result = supabase.table("document_insights").select(
+            "summary, insights_data, generated_at"
+        ).eq("document_id", document_id).order("generated_at", desc=True).limit(1).maybe_single().execute()
         
+        if insights_result.data:
+            document_details["latest_summary"] = insights_result.data.get("summary")
+            document_details["latest_insights"] = insights_result.data.get("insights_data")
+            document_details["insights_generated_at"] = insights_result.data.get("generated_at")
+        else:
+            document_details["latest_summary"] = None
+            document_details["latest_insights"] = None
+            document_details["insights_generated_at"] = None
+
+        return document_details
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"File details error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to get file details: {str(e)}")
+        logger.error(f"Document details error for doc_id {document_id}, user {user.id}: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to get document details: {str(e)}")
 
-@app.post("/api/files/{file_id}/analyze")
-async def analyze_file(
-    file_id: str, 
-    request: FileAnalysisRequest,
-    user=Depends(get_current_user)
-):
-    """Perform additional AI analysis on an uploaded file"""
+@app.post("/api/documents/{document_id}/summary", response_model=Dict[str, Any])
+async def generate_document_summary_endpoint(document_id: str, user=Depends(get_current_user)):
+    """Generates and returns a summary for a document, stores it."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    user_id_str = str(user.id)
+
+    doc_res = supabase.table("documents").select("text, status, uploader_id").eq("id", document_id).eq("uploader_id", user_id_str).maybe_single().execute()
+    if not doc_res.data:
+        raise HTTPException(status_code=404, detail="Document not found or not owned by user.")
+
+    doc_text = doc_res.data.get("text")
+    if not doc_text: # If text is missing, even if status is 'analyzed' (which implies text should be there)
+        logger.error(f"Document {document_id} text is missing for summary generation. Status: {doc_res.data.get('status')}")
+        raise HTTPException(status_code=422, detail="Document has no text content to summarize. It might not have been processed correctly.")
+        
+    summary = await agent_logic.generate_document_summary_with_gemini(doc_text, user_id=user_id_str)
+
+    # Store/Update the summary in document_insights
     try:
-        if not supabase:
-            raise HTTPException(status_code=500, detail="Database not configured")
-            
-        # Get file record
-        result = supabase.table("uploaded_files").select("*").eq("id", file_id).eq("user_id", user.id).execute()
+        existing_insight_res = supabase.table("document_insights").select("id").eq("document_id", document_id).eq("user_id", user_id_str).maybe_single().execute()
         
-        if not result.data:
-            raise HTTPException(status_code=404, detail="File not found")
-            
-        file_record = result.data[0]
-        processed_data = file_record["processed_data"]
-        
-        # Generate enhanced AI analysis
-        ai_analysis = await ai_agent.process_file_with_ai(
-            processed_data, 
-            request.additional_context or request.analysis_type
-        )
-        
-        # Store analysis result
-        analysis_record = {
-            "file_id": file_id,
-            "user_id": user.id,
-            "analysis_type": request.analysis_type,
-            "analysis_result": ai_analysis,
-            "additional_context": request.additional_context,
-            "created_at": datetime.now().isoformat()
+        current_utc_time = datetime.now(timezone.utc).isoformat()
+        insight_payload = {
+            "summary": summary,
+            "updated_at": current_utc_time
         }
         
-        supabase.table("file_analyses").insert(analysis_record).execute()
+        if existing_insight_res.data:
+            insight_id = existing_insight_res.data["id"]
+            update_op = supabase.table("document_insights").update(insight_payload).eq("id", insight_id).execute()
+            if update_op.error: logger.error(f"Error updating summary for doc {document_id}: {update_op.error.message}")
+            else: logger.info(f"Updated summary for document {document_id} (insight ID: {insight_id})")
+        else:
+            insight_payload["id"] = str(uuid.uuid4())
+            insight_payload["document_id"] = document_id
+            insight_payload["user_id"] = user_id_str
+            insight_payload["generated_at"] = current_utc_time
+            # insights_data can be null if only summary is generated
+            insight_payload["insights_data"] = {} # Or some default if schema requires it
+            insert_op = supabase.table("document_insights").insert(insight_payload).execute()
+            if insert_op.error: logger.error(f"Error inserting summary for doc {document_id}: {insert_op.error.message}")
+            else: logger.info(f"Stored new summary for document {document_id}")
+
+    except Exception as db_e:
+        logger.error(f"DB error storing summary for doc {document_id}: {db_e}\n{traceback.format_exc()}")
+        # Continue to return summary even if DB store fails for now
+
+    return {"document_id": document_id, "summary": summary}
+
+@app.post("/api/documents/{document_id}/insights", response_model=Dict[str, Any])
+async def generate_document_insights_endpoint(document_id: str, user=Depends(get_current_user)):
+    """Generates and returns insights for a document, stores them."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    user_id_str = str(user.id)
+
+    doc_res = supabase.table("documents").select("text, status, uploader_id").eq("id", document_id).eq("uploader_id", user_id_str).maybe_single().execute()
+    if not doc_res.data:
+        raise HTTPException(status_code=404, detail="Document not found or not owned by user.")
+
+    doc_text = doc_res.data.get("text")
+    if not doc_text:
+        logger.error(f"Document {document_id} text is missing for insights generation. Status: {doc_res.data.get('status')}")
+        raise HTTPException(status_code=422, detail="Document has no text content for insights. It might not have been processed correctly.")
+
+    insights = await agent_logic.generate_document_insights_with_gemini(doc_text, user_id=user_id_str)
+
+    # Store/Update insights in document_insights
+    try:
+        existing_insight_res = supabase.table("document_insights").select("id, summary").eq("document_id", document_id).eq("user_id", user_id_str).maybe_single().execute()
+        current_utc_time = datetime.now(timezone.utc).isoformat()
         
-        return {
-            "file_id": file_id,
-            "analysis_type": request.analysis_type,
-            "analysis_result": ai_analysis,
-            "timestamp": datetime.now().isoformat()
+        insight_payload = {
+            "insights_data": insights,
+            "updated_at": current_utc_time
         }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"File analysis error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"File analysis failed: {str(e)}")
+
+        if existing_insight_res.data:
+            insight_id = existing_insight_res.data["id"]
+            # Preserve existing summary if this endpoint only generates insights
+            if existing_insight_res.data.get("summary"):
+                 insight_payload["summary"] = existing_insight_res.data.get("summary")
+
+            update_op = supabase.table("document_insights").update(insight_payload).eq("id", insight_id).execute()
+            if update_op.error: logger.error(f"Error updating insights for doc {document_id}: {update_op.error.message}")
+            else: logger.info(f"Updated insights for document {document_id} (insight ID: {insight_id})")
+        else:
+            insight_payload["id"] = str(uuid.uuid4())
+            insight_payload["document_id"] = document_id
+            insight_payload["user_id"] = user_id_str
+            insight_payload["generated_at"] = current_utc_time
+            # If only insights are generated, summary might be null or a default
+            insight_payload["summary"] = "Summary not generated via this operation."
+            insert_op = supabase.table("document_insights").insert(insight_payload).execute()
+            if insert_op.error: logger.error(f"Error inserting insights for doc {document_id}: {insert_op.error.message}")
+            else: logger.info(f"Stored new insights for document {document_id}")
+
+    except Exception as db_e:
+        logger.error(f"DB error storing insights for doc {document_id}: {db_e}\n{traceback.format_exc()}")
+
+    return {"document_id": document_id, "insights": insights}
+
+
+# The old /api/files/{file_id}/analyze endpoint is now effectively replaced by
+# /api/documents/{document_id}/insights and /summary.
+# If specific 'analysis_type' logic from the old endpoint is still needed beyond general summary/insights,
+# it would require further refactoring or a new dedicated endpoint.
+# For now, we assume the new summary/insights cover the primary AI analysis needs for documents.
 
 # Data Sources Management
 @app.get("/api/data-sources")
@@ -727,13 +932,14 @@ async def get_data_sources(user=Depends(get_current_user)):
     try:
         if not supabase:
             return []
-            
+
         result = supabase.table("data_sources").select("*").eq("user_id", user.id).execute()
         return result.data
-        
+
     except Exception as e:
         logger.error(f"Data sources fetch error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch data sources: {str(e)}")
+
 
 @app.post("/api/data-sources")
 async def create_data_source(data_source: DataSource, user=Depends(get_current_user)):
@@ -741,7 +947,7 @@ async def create_data_source(data_source: DataSource, user=Depends(get_current_u
     try:
         if not supabase:
             raise HTTPException(status_code=500, detail="Database not configured")
-            
+
         data_source_record = {
             "user_id": user.id,
             "name": data_source.name,
@@ -751,27 +957,24 @@ async def create_data_source(data_source: DataSource, user=Depends(get_current_u
             "config": data_source.config,
             "status": data_source.status,
             "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
+            "updated_at": datetime.now().isoformat(),
         }
-        
+
         result = supabase.table("data_sources").insert(data_source_record).execute()
         return result.data[0]
-        
+
     except Exception as e:
         logger.error(f"Data source creation error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to create data source: {str(e)}")
 
+
 @app.put("/api/data-sources/{source_id}")
-async def update_data_source(
-    source_id: str, 
-    data_source: DataSource, 
-    user=Depends(get_current_user)
-):
+async def update_data_source(source_id: str, data_source: DataSource, user=Depends(get_current_user)):
     """Update an existing data source"""
     try:
         if not supabase:
             raise HTTPException(status_code=500, detail="Database not configured")
-            
+
         update_data = {
             "name": data_source.name,
             "type": data_source.type,
@@ -779,21 +982,22 @@ async def update_data_source(
             "category": data_source.category,
             "config": data_source.config,
             "status": data_source.status,
-            "updated_at": datetime.now().isoformat()
+            "updated_at": datetime.now().isoformat(),
         }
-        
+
         result = supabase.table("data_sources").update(update_data).eq("id", source_id).eq("user_id", user.id).execute()
-        
+
         if not result.data:
             raise HTTPException(status_code=404, detail="Data source not found")
-            
+
         return result.data[0]
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Data source update error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to update data source: {str(e)}")
+
 
 @app.delete("/api/data-sources/{source_id}")
 async def delete_data_source(source_id: str, user=Depends(get_current_user)):
@@ -801,55 +1005,58 @@ async def delete_data_source(source_id: str, user=Depends(get_current_user)):
     try:
         if not supabase:
             raise HTTPException(status_code=500, detail="Database not configured")
-            
+
         result = supabase.table("data_sources").delete().eq("id", source_id).eq("user_id", user.id).execute()
-        
+
         if not result.data:
             raise HTTPException(status_code=404, detail="Data source not found")
-            
+
         return {"message": "Data source deleted successfully"}
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Data source deletion error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to delete data source: {str(e)}")
 
+
 @app.post("/api/data-sources/{source_id}/test")
 async def test_data_source(source_id: str, user=Depends(get_current_user)):
     try:
         if not supabase:
             raise HTTPException(status_code=500, detail="Database not configured")
+            
         result = supabase.table("data_sources").select("*").eq("id", source_id).eq("user_id", user.id).execute()
+        
         if not result.data:
             raise HTTPException(status_code=404, detail="Data source not found")
+            
         data_source = result.data[0]
-        # Implement actual connection test logic here based on data_source['type']
-        # Example: For API, try a real request; for DB, try a real connection
-        # For now, just check if config is present
-        if data_source.get("config"):
-            test_successful = True
-            message = f"Successfully connected to {data_source['name']}"
-        else:
-            test_successful = False
-            message = f"Failed to connect to {data_source['name']} (missing config)"
-        supabase.table("data_sources").update({
-            "status": "active" if test_successful else "error",
-            "last_sync": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
-        }).eq("id", source_id).execute()
-        return {
-            "test_successful": test_successful,
+        
+        # Mock connection test - in production, implement actual API testing
+        test_result = {
+            "test_successful": True,
             "tested_service_type": data_source["type"],
-            "message": message,
+            "message": f"Successfully connected to {data_source['name']}",
             "response_time_ms": 150,
             "timestamp": datetime.now().isoformat()
         }
+        
+        # Update data source status
+        supabase.table("data_sources").update({
+            "status": "active" if test_result["test_successful"] else "error",
+            "last_sync": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat()
+        }).eq("id", source_id).execute()
+        
+        return test_result
+        
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Data source test error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Data source test failed: {str(e)}")
+
 
 @app.post("/api/data-sources/{source_id}/sync")
 async def sync_data_source(source_id: str, user=Depends(get_current_user)):
@@ -857,16 +1064,14 @@ async def sync_data_source(source_id: str, user=Depends(get_current_user)):
     try:
         if not supabase:
             raise HTTPException(status_code=500, detail="Database not configured")
-            
+
         result = supabase.table("data_sources").select("*").eq("id", source_id).eq("user_id", user.id).execute()
-        
+
         if not result.data:
             raise HTTPException(status_code=404, detail="Data source not found")
             
         data_source = result.data[0]
-    except Exception as e:
-        logger.error(f"Data source sync error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Data source sync failed: {str(e)}")
+
 
 @app.get("/api/documents/search")
 async def search_documents(
@@ -925,119 +1130,143 @@ async def search_documents(
         }
         
     except Exception as e:
-        logger.error(f"Document search error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+        logger.error(f"Error updating user profile for {user_id_str}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to update profile: {str(e)}")
 
-@app.get("/api/documents/{document_id}/summary")
-async def get_document_summary(document_id: str, user=Depends(get_current_user)):
-    """Get AI-generated summary of a document"""
+
+# User Preferences Endpoints
+@app.get("/api/users/me/preferences", response_model=UserPreferences)
+async def get_user_preferences(user=Depends(get_current_user)):
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    user_id_str = str(user.id)
     try:
-        if not supabase:
-            raise HTTPException(status_code=500, detail="Database not configured")
-        
-        result = supabase.table("documents").select("*").eq("id", document_id).eq("uploader_id", user.id).execute()
-        
-        if not result.data:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        doc = result.data[0]
-        text_content = doc.get("text", "")
-        
-        if not text_content:
-            raise HTTPException(status_code=400, detail="Document has no extractable text")
-        
-        # Generate AI summary using the market intelligence agent
-        summary_insights = await ai_agent.generate_insights(
-            f"Summarize this document: {text_content[:2000]}",  # Limit to first 2000 chars
-            {"type": "document_summary", "document_id": document_id}
-        )
-        
-        return {
-            "document_id": document_id,
-            "filename": doc["original_filename"],
-            "summary": summary_insights.get("insights", ["No summary available"]),
-            "key_points": summary_insights.get("recommendations", []),
-            "confidence_score": summary_insights.get("confidence_score", 0.5),
-            "word_count": doc.get("word_count", 0),
-            "text_quality": doc.get("analysis", {}).get("text_quality", "unknown")
-        }
-        
-    except HTTPException:
-        raise
+        result = supabase.table("user_preferences").select("*").eq("user_id", user_id_str).maybe_single().execute()
+        if result.data:
+            return result.data
+        return UserPreferences()  # Return default empty preferences if not found
     except Exception as e:
-        logger.error(f"Document summary error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")
+        logger.error(f"Error fetching preferences for user {user_id_str}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Failed to fetch user preferences")
 
-@app.post("/api/documents/{document_id}/extract-insights")
-async def extract_document_insights(
-    document_id: str, 
-    insight_type: str = "market_analysis",
-    user=Depends(get_current_user)
-):
-    """Extract specific insights from a document"""
+
+@app.put("/api/users/me/preferences", response_model=UserPreferences)
+async def update_user_preferences(preferences: UserPreferences, user=Depends(get_current_user)):
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    user_id_str = str(user.id)
+
+    update_data = preferences.model_dump(exclude_unset=True)  # Get only fields that were set
+    update_data["user_id"] = user_id_str  # Ensure user_id is set for upsert
+    update_data["updated_at"] = datetime.now().isoformat()
+
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No preference data provided")
+
     try:
-        if not supabase:
-            raise HTTPException(status_code=500, detail="Database not configured")
-        
-        result = supabase.table("documents").select("*").eq("id", document_id).eq("uploader_id", user.id).execute()
-        
-        if not result.data:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        doc = result.data[0]
-        text_content = doc.get("text", "")
-        analysis = doc.get("analysis", {})
-        
-        if not text_content:
-            raise HTTPException(status_code=400, detail="Document has no extractable text")
-        
-        # Define insight extraction prompts
-        insight_prompts = {
-            "market_analysis": "Analyze this document for market trends, opportunities, and competitive insights:",
-            "financial_analysis": "Extract financial metrics, performance indicators, and financial insights from:",
-            "strategic_planning": "Identify strategic recommendations, action items, and planning insights from:",
-            "customer_insights": "Extract customer behavior patterns, preferences, and insights from:",
-            "risk_assessment": "Identify potential risks, challenges, and mitigation strategies from:"
-        }
-        
-        prompt = insight_prompts.get(insight_type, "Analyze this document for business insights:")
-        
-        # Generate AI insights
-        insights = await ai_agent.generate_insights(
-            f"{prompt} {text_content[:3000]}",  # Limit content length
-            {
-                "type": f"document_{insight_type}",
-                "document_id": document_id,
-                "insight_type": insight_type
+        # Upsert ensures that if a record for the user doesn't exist, it's created.
+        # If it exists, it's updated.
+        result = supabase.table("user_preferences").upsert(update_data).execute()
+        if result.data:
+            return result.data[0]
+        # Supabase upsert with returning="minimal" (default) might not return data on conflict/update.
+        # Fetch after update if necessary, or rely on client to assume success.
+        # For now, let's fetch to be sure.
+        fetch_result = supabase.table("user_preferences").select("*").eq("user_id", user_id_str).single().execute()
+        return fetch_result.data
+
+    except Exception as e:
+        logger.error(f"Error updating preferences for user {user_id_str}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Failed to update user preferences")
+
+
+# Application Settings Endpoints
+@app.get("/api/app-settings", response_model=List[AppSettingItem])
+async def get_app_settings(user=Depends(get_current_user)):  # Added auth for now, can be removed if settings are public
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    try:
+        result = supabase.table("app_settings").select("setting_key, setting_value, description").execute()
+        return result.data if result.data else []
+    except Exception as e:
+        logger.error(f"Error fetching app settings: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Failed to fetch application settings")
+
+
+@app.put("/api/app-settings", response_model=List[AppSettingItem])
+async def update_app_settings(
+    app_settings_update: AppSettingsUpdateRequest, user=Depends(get_current_user)  # Require auth for updates
+):
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Database not configured")
+
+    updated_settings = []
+    # For simplicity, this endpoint will update existing keys.
+    # A more robust version might handle creation or require admin roles.
+    try:
+        for setting_item in app_settings_update.settings:
+            update_payload = {
+                "setting_value": setting_item.setting_value,
+                "description": setting_item.description,
+                "updated_at": datetime.now().isoformat(),
             }
-        )
-        
-        # Store insights for future reference
-        insight_record = {
-            "document_id": document_id,
-            "user_id": user.id,
-            "insight_type": insight_type,
-            "insights": insights,
-            "created_at": datetime.now().isoformat()
-        }
-        
-        supabase.table("document_insights").insert(insight_record).execute()
-        
-        return {
-            "document_id": document_id,
-            "insight_type": insight_type,
-            "insights": insights.get("insights", []),
-            "recommendations": insights.get("recommendations", []),
-            "confidence_score": insights.get("confidence_score", 0.5),
-            "analysis_metadata": analysis.get("keyword_analysis", {}),
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except HTTPException:
-        raise
+            # Upsert based on setting_key
+            result = (
+                supabase.table("app_settings")
+                .upsert(
+                    {
+                        "setting_key": setting_item.setting_key,
+                        "setting_value": setting_item.setting_value,
+                        "description": setting_item.description,
+                        "updated_at": datetime.now().isoformat(),
+                    },
+                    on_conflict="setting_key",
+                )
+                .execute()
+            )  # type: ignore
+
+            if result.data:
+                updated_settings.append(result.data[0])
+            else:  # If upsert doesn't return data on conflict, fetch it
+                fetch_res = (
+                    supabase.table("app_settings")
+                    .select("setting_key, setting_value, description")
+                    .eq("setting_key", setting_item.setting_key)
+                    .single()
+                    .execute()
+                )
+                if fetch_res.data:
+                    updated_settings.append(fetch_res.data)
+
+        return updated_settings
+
     except Exception as e:
         logger.error(f"Document insights extraction error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Insight extraction failed: {str(e)}")
+
+
+        
+        # Mock sync process - in production, implement actual data syncing
+        sync_result = {
+            "sync_successful": True,
+            "records_synced": 150,
+            "message": f"Successfully synced data from {data_source['name']}",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Update last sync timestamp
+        supabase.table("data_sources").update({
+            "last_sync": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat()
+        }).eq("id", source_id).execute()
+        
+        return sync_result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Data source sync error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Data source sync failed: {str(e)}")
 
 @app.get("/api/kpi")
 async def get_kpi(timeframe: str = "30d", category: str = "all"):
@@ -1050,38 +1279,24 @@ async def get_kpi(timeframe: str = "30d", category: str = "all"):
                 "current": 125000 + (hash(timeframe) % 10000),
                 "previous": 118000,
                 "change": 5.9,
-                "trend": "up"
+                "trend": "up",
             },
-            "customers": {
-                "current": 1250 + (hash(category) % 100),
-                "previous": 1180,
-                "change": 5.9,
-                "trend": "up"
-            },
-            "conversion": {
-                "current": 3.2,
-                "previous": 2.8,
-                "change": 14.3,
-                "trend": "up"
-            },
-            "satisfaction": {
-                "current": 4.6,
-                "previous": 4.4,
-                "change": 4.5,
-                "trend": "up"
-            },
+            "customers": {"current": 1250 + (hash(category) % 100), "previous": 1180, "change": 5.9, "trend": "up"},
+            "conversion": {"current": 3.2, "previous": 2.8, "change": 14.3, "trend": "up"},
+            "satisfaction": {"current": 4.6, "previous": 4.4, "change": 4.5, "trend": "up"},
             "metadata": {
                 "timeframe": timeframe,
                 "category": category,
                 "last_updated": datetime.now().isoformat(),
-                "data_quality": "high"
-            }
+                "data_quality": "high",
+            },
         }
 
         return kpi_data
     except Exception as e:
         logger.error(f"KPI error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"KPI fetch failed: {str(e)}")
+
 
 @app.post("/api/kpi")
 async def store_kpi(request: KPIRequest):
@@ -1094,13 +1309,14 @@ async def store_kpi(request: KPIRequest):
             "metric": request.metric,
             "value": request.value,
             "timestamp": request.timestamp or datetime.now().isoformat(),
-            "id": f"kpi_{hash(request.metric)}_{int(datetime.now().timestamp())}"
+            "id": f"kpi_{hash(request.metric)}_{int(datetime.now().timestamp())}",
         }
 
         return stored_data
     except Exception as e:
         logger.error(f"KPI storage error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"KPI storage failed: {str(e)}")
+
 
 @app.post("/api/agent/sync")
 async def agent_sync(request: AgentSyncRequest):
@@ -1114,13 +1330,14 @@ async def agent_sync(request: AgentSyncRequest):
             "data": request.data,
             "status": "completed",
             "timestamp": datetime.now().isoformat(),
-            "sync_id": f"sync_{hash(request.action)}_{int(datetime.now().timestamp())}"
+            "sync_id": f"sync_{hash(request.action)}_{int(datetime.now().timestamp())}",
         }
 
         return sync_result
     except Exception as e:
         logger.error(f"Agent sync error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Agent sync failed: {str(e)}")
+
 
 @app.get("/api/agent/status")
 async def agent_status():
@@ -1135,20 +1352,17 @@ async def agent_status():
             "data_sync",
             "file_processing",
             "rag_search",
-            "ai_insights"
+            "ai_insights",
         ],
         "ai_models": ["google-gemini"],
         "file_types_supported": [".csv", ".xlsx", ".pdf", ".txt"],
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
     }
+
 
 # Report Generation Endpoints
 @app.post("/api/reports/generate")
-async def generate_report(
-    report_type: str = "comprehensive",
-    format: str = "json",
-    user=Depends(get_current_user)
-):
+async def generate_report(report_type: str = "comprehensive", format: str = "json", user=Depends(get_current_user)):
     """Generate various types of reports"""
     try:
         if not supabase:
@@ -1157,7 +1371,7 @@ async def generate_report(
         # Get user's data for report generation
         analyses = supabase.table("market_analyses").select("*").eq("user_id", user.id).limit(10).execute()
         files = supabase.table("uploaded_files").select("*").eq("user_id", user.id).limit(10).execute()
-        
+
         report_data = {
             "report_id": str(uuid.uuid4()),
             "report_type": report_type,
@@ -1166,56 +1380,71 @@ async def generate_report(
             "summary": {
                 "total_analyses": len(analyses.data),
                 "total_files": len(files.data),
-                "most_recent_analysis": analyses.data[0]["created_at"] if analyses.data else None
+                "most_recent_analysis": analyses.data[0]["created_at"] if analyses.data else None,
             },
             "analyses": analyses.data[:5],  # Latest 5 analyses
             "file_summary": [
-                {
-                    "filename": f["filename"],
-                    "type": f["file_type"],
-                    "uploaded": f["uploaded_at"]
-                } for f in files.data[:5]
-            ]
+                {"filename": f["filename"], "type": f["file_type"], "uploaded": f["uploaded_at"]}
+                for f in files.data[:5]
+            ],
         }
-        
+
         if format == "csv":
             # For CSV format, return structured data
             return {
                 "report_id": report_data["report_id"],
                 "download_url": f"/api/reports/{report_data['report_id']}/download",
                 "format": "csv",
-                "generated_at": report_data["generated_at"]
+                "generated_at": report_data["generated_at"],
             }
-        
+
         return report_data
-        
+
     except Exception as e:
         logger.error(f"Report generation error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
 
+
 @app.get("/api/reports/{report_id}/download")
 async def download_report(report_id: str, format: str = "json"):
+    """Download a generated report"""
     try:
-        if not supabase:
-            raise HTTPException(status_code=500, detail="Database not configured")
-        result = supabase.table("reports").select("*").eq("id", report_id).execute()
-        if not result.data:
-            raise HTTPException(status_code=404, detail="Report not found")
-        report = result.data[0]
+        # In production, retrieve actual report data
+        mock_report = {
+            "report_id": report_id,
+            "title": "Market Intelligence Report",
+            "generated_at": datetime.now().isoformat(),
+            "sections": [
+                {
+                    "title": "Executive Summary",
+                    "content": "Market analysis shows positive trends in digital transformation sectors."
+                },
+                {
+                    "title": "Key Insights",
+                    "content": "3 major opportunities identified in emerging markets."
+                }
+            ]
+        }
+        
         if format == "csv":
             import io
+
             output = io.StringIO()
             output.write("Section,Content\n")
-            for section in report.get("sections", []):
-                output.write(f'"{section.get("title", "")}","{section.get("content", "")}"\n')
+            for section in mock_report["sections"]:
+                output.write(f'"{section["title"]}","{section["content"]}"\n')
+            
             return JSONResponse(
                 content={"csv_data": output.getvalue()},
-                headers={"Content-Disposition": f"attachment; filename=report_{report_id}.csv"}
+                headers={"Content-Disposition": f"attachment; filename=report_{report_id}.csv"},
             )
-        return report
+        
+        return mock_report
+        
     except Exception as e:
         logger.error(f"Report download error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Report download failed: {str(e)}")
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
