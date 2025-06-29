@@ -10,9 +10,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Separator } from "@/components/ui/separator"
 import { Badge } from "@/components/ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-// LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area removed from recharts
-// as charts are being removed or simplified to not use them.
-// import { useColorPalette } from "@/lib/color-context" // Removed as chartColors is no longer used
 
 interface Trend {
   id: string;
@@ -26,11 +23,7 @@ interface Trend {
   // data: Array<{ month: string; value: number }>; // Removed mini-chart data
 }
 
-// mockTrends and overallTrendData removed
-
 export default function TrendsPage() {
-  // const { getChartColors } = useColorPalette() // Removed
-  // const chartColors = getChartColors() // Removed
   const [trends, setTrends] = useState<Trend[]>([]) // Initialize with empty array
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [selectedCategory, setSelectedCategory] = useState<string>("all")
@@ -69,6 +62,11 @@ export default function TrendsPage() {
     } catch (error) {
       console.error("Failed to fetch or transform trends data:", error);
       setTrends([]);
+      toast({
+        title: "Trends Data Error",
+        description: "Failed to load trends data.",
+        variant: "destructive",
+      });
     } finally {
       setIsLoading(false);
     }

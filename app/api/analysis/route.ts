@@ -32,13 +32,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ 
         error: "Backend service unavailable",
         details: "The analysis service is currently unavailable. Please try again later.",
-        fallback_data: {
-          query: query_str,
-          market_domain: market_domain_str,
-          question: question_str,
-          analysis: "Service temporarily unavailable. Mock analysis data would be displayed here.",
-          timestamp: new Date().toISOString()
-        }
+        
       }, { status: 503 })
     }
 
@@ -62,13 +56,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ 
         error: "Analysis service error",
         details: `Service returned ${response.status}`,
-        fallback_data: {
-          query: query_str,
-          market_domain: market_domain_str,
-          question: question_str,
-          analysis: "Analysis temporarily unavailable. Please try again later.",
-          timestamp: new Date().toISOString()
-        }
+        
       }, { status: 502 })
     }
 
@@ -81,10 +69,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ 
       error: "Failed to process analysis request",
       details: error instanceof Error ? error.message : "Unknown error",
-      fallback_data: {
-        analysis: "Analysis service is currently unavailable. Please try again later.",
-        timestamp: new Date().toISOString()
-      }
+      
     }, { status: 500 })
   }
 }

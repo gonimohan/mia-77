@@ -14,37 +14,25 @@ export async function POST(request: NextRequest) {
     }
 
     // Try to sync with Python agent
-    try {
-      const response = await fetch(`${PYTHON_API_BASE_URL}/agent/sync`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ action, data }),
-        signal: AbortSignal.timeout(15000),
-      })
+    const response = await fetch(`${PYTHON_API_BASE_URL}/agent/sync`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ action, data }),
+      signal: AbortSignal.timeout(15000),
+    })
 
-      if (!response.ok) {
-        throw new Error(`Python API responded with status: ${response.status}`)
-      }
-
-      const responseData = await response.json()
-      return NextResponse.json(responseData)
-    } catch (apiError) {
-      console.error("Python Agent API error:", apiError)
-      
-      // Return mock sync response
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ detail: `Python API responded with status: ${response.status}` }));
       return NextResponse.json({
-        success: true,
-        message: `Agent sync for action "${action}" completed (offline mode)`,
-        data: {
-          action,
-          status: "queued",
-          timestamp: new Date().toISOString(),
-          note: "Sync queued for when service becomes available"
-        }
-      })
+        error: errorData.detail || `Python API responded with status: ${response.status}`,
+        details: errorData.message || "No additional details."
+      }, { status: response.status });
     }
+
+    const responseData = await response.json()
+    return NextResponse.json(responseData)
   } catch (error) {
     console.error("Agent sync API error:", error)
     return NextResponse.json({ 

@@ -31,13 +31,17 @@ export default function RegisterPage() {
     setLoading(true)
     setError("")
 
-    // Validation
+    // Enhanced Validation
+    if (!fullName.trim()) {
+      setError("Full name is required")
+      setLoading(false)
+      return
+    }
     if (password !== confirmPassword) {
       setError("Passwords do not match")
       setLoading(false)
       return
     }
-
     if (password.length < 6) {
       setError("Password must be at least 6 characters long")
       setLoading(false)
@@ -45,12 +49,15 @@ export default function RegisterPage() {
     }
 
     try {
+      // The data object now includes user, session, and error.
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
+          // User metadata to be stored in auth.users.raw_user_meta_data
           data: {
             full_name: fullName,
+            onboarding_complete: false,
           },
         },
       })
@@ -65,12 +72,27 @@ export default function RegisterPage() {
         return
       }
 
+      // If signUp is successful, data.user will be populated.
+      // If the user already exists but is not confirmed, signUp will not return an error,
+      // but data.user will be null. It will, however, resend the confirmation email.
       if (data.user) {
         toast({
           title: "Registration Successful",
           description: "Please check your email to verify your account.",
         })
+        // Redirect to login page after successful registration prompt.
+        setEmail("");
+        setPassword("");
+        setConfirmPassword("");
+        setFullName("");
         router.push("/login")
+      } else {
+        // This handles the case where a user exists but is not confirmed.
+        setError("User already exists. Please check your email for a verification link.")
+        toast({
+          title: "Confirmation Email Resent",
+          description: "If you have an account, a new confirmation link has been sent to your email.",
+        })
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "An unexpected error occurred"

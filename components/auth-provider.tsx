@@ -37,13 +37,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null)
   const configured = isSupabaseConfigured()
   // Initialize the client-side Supabase client here
-  const [supabaseClient, setSupabaseClient] = useState<SupabaseClient | null>(null);
-
-  useEffect(() => {
-    if (configured) {
-      setSupabaseClient(createBrowserClient());
-    }
-  }, [configured]);
+  const [supabaseClient] = useState(() => isSupabaseConfigured() ? createBrowserClient() : null);
 
   useEffect(() => {
     if (!configured) {
@@ -59,6 +53,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     // Get initial session
+    const timeout = setTimeout(() => {
+      if (loading) {
+        setError("Authentication timed out.");
+        setLoading(false);
+      }
+    }, 10000);
+
     const getInitialSession = async () => {
       try {
         const {
@@ -76,6 +77,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         console.error("Error in getInitialSession:", catchError)
         setError("Failed to initialize authentication")
       } finally {
+        clearTimeout(timeout);
         setLoading(false)
       }
     }

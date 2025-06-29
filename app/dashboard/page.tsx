@@ -35,40 +35,38 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { useToast } from "@/hooks/use-toast"
 import { FeatureTracker } from "@/components/feature-tracker"
+import { useAuth } from "@/components/auth-provider"
+import { OnboardingFlow } from "@/components/onboarding-flow"
+import { WidgetSelectorDialog, DashboardWidgetConfig } from "@/components/widget-selector-dialog"
+import { HistoricalKpiChartDialog } from "@/components/historical-kpi-chart-dialog"
+import { Settings2 } from "lucide-react"
 
-
-// Sample data for charts
-// const trendData = [ // This will be replaced by fetched data
-//   { month: "Jan", value: 65, competitors: 45 },
-//   { month: "Feb", value: 72, competitors: 48 },
-//   { month: "Mar", value: 68, competitors: 52 },
-//   { month: "Apr", value: 85, competitors: 58 },
-//   { month: "May", value: 92, competitors: 62 },
-//   { month: "Jun", value: 88, competitors: 65 },
-// ]
-
-const marketShareData = [
-  { name: "Our Company", value: 35, color: "#00FFFF" },
-  { name: "Competitor A", value: 25, color: "#39FF14" },
-  { name: "Competitor B", value: 20, color: "#FF1493" },
-  { name: "Others", value: 20, color: "#BF00FF" },
-]
-
-const competitorData = [
-  { name: "TechCorp", activity: 85, growth: 12.3 },
-  { name: "InnovateLabs", activity: 72, growth: 8.7 },
-  { name: "FutureSoft", activity: 91, growth: 15.6 },
-  { name: "DataDrive", activity: 68, growth: 6.2 },
-]
+const defaultWidgets: DashboardWidgetConfig[] = [
+  { id: "kpiCards", title: "Key Performance Indicators", defaultEnabled: true },
+  { id: "trendImpactChart", title: "Identified Trends Impact", defaultEnabled: true },
+  { id: "marketShareChart", title: "Market Share", defaultEnabled: true },
+  { id: "competitorActivity", title: "Competitor Activity", defaultEnabled: true },
+  { id: "developmentProgress", title: "Development Progress (Dev Only)", defaultEnabled: false },
+  { id: "quickActions", title: "Quick Actions", defaultEnabled: true },
+];
 
 export default function DashboardPage() {
   const { getChartColors } = useColorPalette()
   const chartColors = getChartColors()
+  const { user, supabaseClient, loading: authLoading } = useAuth();
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [kpiData, setKpiData] = useState<any[]>([]) // Initialize with empty array
   const [marketShareDataState, setMarketShareDataState] = useState<any[]>([]);
   const [competitorActivityDataState, setCompetitorActivityDataState] = useState<any[]>([]);
   const [trendsChartDataState, setTrendsChartDataState] = useState<any[]>([]);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [isWidgetSelectorOpen, setIsWidgetSelectorOpen] = useState(false);
+  const [enabledWidgets, setEnabledWidgets] = useState<string[]>([]);
+
+  // State for Historical KPI Dialog
+  const [isHistoricalKpiDialogOpen, setIsHistoricalKpiDialogOpen] = useState(false);
+  const [selectedKpiForHistory, setSelectedKpiForHistory] = useState<{ title: string; unit: string } | null>(null);
+  const [historicalKpiData, setHistoricalKpiData] = useState<{ date: string; value: number }[]>([]);
 
   // State for Analysis Dialog
   const [isAnalysisDialogOpen, setIsAnalysisDialogOpen] = useState(false);
@@ -89,9 +87,117 @@ export default function DashboardPage() {
   const kpiIconsList = [TrendingUp, Users, Heart, PieChart, DollarSign, Briefcase, Activity, Target];
   const kpiColorsList = ["blue", "green", "pink", "purple", "orange", "blue", "green", "pink"];
 
+  useEffect(() => {
+    if (!authLoading && user) {
+      const onboardingComplete = user.user_metadata?.onboarding_complete;
+      if (onboardingComplete === false || onboardingComplete === undefined || onboardingComplete === null) {
+        setShowOnboarding(true);
+      }
+
+      const userWidgets = user.user_metadata?.dashboard_widgets;
+      if (Array.isArray(userWidgets)) {
+        setEnabledWidgets(userWidgets);
+      } else {
+        // If no custom settings, enable all default widgets
+        setEnabledWidgets(defaultWidgets.filter(w => w.defaultEnabled).map(w => w.id));
+      }
+    }
+  }, [user, authLoading]);
+
+  const handleOnboardingComplete = async () => {
+    if (user && supabaseClient) {
+      try {
+        const { data, error } = await supabaseClient.auth.updateUser({
+          data: { onboarding_complete: true }
+        });
+
+        if (error) {
+          console.error("Error updating user metadata:", error);
+          toast({
+            title: "Onboarding Error",
+            description: "Failed to save onboarding status. Please try again.",
+            variant: "destructive",
+          });
+        } else {
+          setShowOnboarding(false);
+          toast({
+            title: "Onboarding Complete",
+            description: "Welcome to your dashboard!",
+          });
+        }
+      } catch (err) {
+        console.error("Unexpected error during onboarding completion:", err);
+        toast({
+          title: "Onboarding Error",
+          description: "An unexpected error occurred.",
+          variant: "destructive",
+        });
+      }
+    }
+  };
+
+  const handleSaveWidgets = async (newEnabledWidgets: string[]) => {
+    if (user && supabaseClient) {
+      try {
+        const { data, error } = await supabaseClient.auth.updateUser({
+          data: { dashboard_widgets: newEnabledWidgets }
+        });
+
+        if (error) {
+          console.error("Error updating dashboard widgets:", error);
+          toast({
+            title: "Save Failed",
+            description: "Failed to save widget preferences. Please try again.",
+            variant: "destructive",
+          });
+        } else {
+          setEnabledWidgets(newEnabledWidgets);
+          toast({
+            title: "Preferences Saved",
+            description: "Dashboard layout updated successfully.",
+          });
+        }
+      } catch (err) {
+        console.error("Unexpected error during widget save:", err);
+        toast({
+          title: "Save Error",
+          description: "An unexpected error occurred while saving preferences.",
+          variant: "destructive",
+        });
+      }
+    }
+  };
+
+  const fetchHistoricalKpiData = async (kpiTitle: string) => {
+    // This is mock data for now. In a real app, you'd fetch this from your backend.
+    // The backend would query your database for historical KPI values.
+    const mockData = [
+      { date: "2023-01-01", value: 100 },
+      { date: "2023-02-01", value: 110 },
+      { date: "2023-03-01", value: 105 },
+      { date: "2023-04-01", value: 120 },
+      { date: "2023-05-01", value: 115 },
+      { date: "2023-06-01", value: 130 },
+      { date: "2023-07-01", value: 125 },
+      { date: "2023-08-01", value: 140 },
+      { date: "2023-09-01", value: 135 },
+      { date: "2023-10-01", value: 150 },
+      { date: "2023-11-01", value: 145 },
+      { date: "2023-12-01", value: 160 },
+    ];
+    setHistoricalKpiData(mockData);
+  };
+
+  const handleViewKpiHistory = (kpiTitle: string) => {
+    const kpi = kpiData.find(k => k.title === kpiTitle);
+    if (kpi) {
+      setSelectedKpiForHistory({ title: kpi.title, unit: kpi.unit });
+      fetchHistoricalKpiData(kpi.title);
+      setIsHistoricalKpiDialogOpen(true);
+    }
+  };
 
   const fetchKpiData = async () => {
-    setIsRefreshing(true);
     try {
       const response = await fetch("/api/kpi");
       if (!response.ok) {
@@ -118,50 +224,44 @@ export default function DashboardPage() {
             change: parseFloat(kpi.change_percentage) || 0,
             icon: assignedIcon,
             color: assignedColor as "blue" | "green" | "pink" | "purple" | "orange", // Type assertion
-            // description: kpi.description, // If you add a description field
           };
         });
         setKpiData(transformedKpis);
       } else {
         console.warn("No data received from /api/kpi or data format is incorrect");
-        setKpiData([]); // Set to empty if no data
+        setKpiData([]);
       }
     } catch (error) {
       console.error("Failed to fetch KPI data:", error);
-      setKpiData([]); // Set to empty on error
-    } finally {
-      setIsRefreshing(false);
+      setKpiData([]);
+      toast({
+        title: "KPI Data Error",
+        description: "Failed to load KPI data.",
+        variant: "destructive",
+      });
+      throw error;
     }
   };
 
   const fetchChartData = async () => {
-    // Assuming setIsRefreshing is handled by the calling context (e.g. fetchKpiData or handleRefresh)
-    // If called independently, uncomment:
-    // setIsRefreshing(true);
     try {
       const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL || 'http://localhost:8000'}/competitors`);
       if (!response.ok) {
-        console.error(`Failed to fetch competitor data: ${response.status} ${response.statusText}`);
-        // Potentially set chart data to empty or error state here
-        setMarketShareDataState([]);
-        setCompetitorActivityDataState([]);
-        return; // Exit if the fetch fails
+        throw new Error(`Failed to fetch competitor data: ${response.status} ${response.statusText}`);
       }
       const responseData = await response.json();
       const competitorList = responseData.data || [];
 
-      // Transform for Market Share Chart
       const transformedMarketShare = competitorList
         .filter((comp: any) => comp.market_share !== undefined && comp.market_share !== null && parseFloat(comp.market_share) > 0)
-        .map((comp: any, index: number) => ({
-          name: comp.company_name || comp.name || comp.title || `Competitor ${index + 1}`,
+        .map((comp: any) => ({
+          name: comp.company_name || comp.name || comp.title || 'Unnamed Competitor',
           value: parseFloat(comp.market_share),
         }));
       setMarketShareDataState(transformedMarketShare);
 
-      // Transform for Competitor Activity Chart
-      const transformedCompetitorActivity = competitorList.map((comp: any, index: number) => ({
-        name: comp.company_name || comp.name || comp.title || `Competitor ${index + 1}`,
+      const transformedCompetitorActivity = competitorList.map((comp: any) => ({
+        name: comp.company_name || comp.name || comp.title || 'Unnamed Competitor',
         activity: parseFloat(comp.activity_score || comp.activity || comp.engagement_rate || 0),
         growth: parseFloat(comp.growth_rate || comp.growth || comp.user_growth || 0),
       }));
@@ -171,18 +271,20 @@ export default function DashboardPage() {
       console.error("Failed to fetch or transform chart data:", error);
       setMarketShareDataState([]);
       setCompetitorActivityDataState([]);
+      toast({
+        title: "Chart Data Error",
+        description: "Failed to load chart data.",
+        variant: "destructive",
+      });
+      throw error;
     }
-    // If called independently, uncomment:
-    // finally { setIsRefreshing(false); }
   };
 
   const fetchTrendsApiData = async () => {
     try {
       const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL || 'http://localhost:8000'}/trends`);
       if (!response.ok) {
-        console.error(`Failed to fetch trends data: ${response.status} ${response.statusText}`);
-        setTrendsChartDataState([]);
-        return;
+        throw new Error(`Failed to fetch trends data: ${response.status} ${response.statusText}`);
       }
       const responseData = await response.json();
       const trendsList = responseData.data || [];
@@ -196,8 +298,8 @@ export default function DashboardPage() {
         return 0;
       };
 
-      const transformedTrendsData = trendsList.map((trend: any, index: number) => ({
-        name: trend.trend_name || `Trend ${index + 1}`,
+      const transformedTrendsData = trendsList.map((trend: any) => ({
+        name: trend.trend_name || 'Unnamed Trend',
         impact: impactToValue(trend.estimated_impact),
       })).filter((trend: any) => trend.impact > 0);
       setTrendsChartDataState(transformedTrendsData);
@@ -205,19 +307,41 @@ export default function DashboardPage() {
     } catch (error) {
       console.error("Failed to fetch or transform trends data:", error);
       setTrendsChartDataState([]);
+      toast({
+        title: "Trends Data Error",
+        description: "Failed to load trends data.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  const loadAllDashboardData = async () => {
+    setIsRefreshing(true);
+    try {
+      await Promise.all([
+        fetchKpiData(),
+        fetchChartData(),
+        fetchTrendsApiData(),
+      ]);
+    } catch (error) {
+      console.error("Failed to load all dashboard data:", error);
+      toast({
+        title: "Data Load Error",
+        description: "Could not fetch all dashboard data. Please try refreshing.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsRefreshing(false);
     }
   };
 
   useEffect(() => {
-    fetchKpiData();
-    fetchChartData();
-    fetchTrendsApiData();
-  }, []); // Empty dependency array means this runs once on mount
+    loadAllDashboardData();
+  }, []);
 
-  const handleRefresh = async () => {
-    setIsRefreshing(true); // Set refreshing true for the whole refresh operation
-    await Promise.all([fetchKpiData(), fetchChartData(), fetchTrendsApiData()]);
-    // setIsRefreshing(false) is handled by fetchKpiData's finally block (or the last promise in Promise.all if they also manage it)
+  const handleRefresh = () => {
+    loadAllDashboardData();
   };
 
   const handleGenerateReport = async () => {
@@ -352,6 +476,9 @@ export default function DashboardPage() {
 
   return (
     <SidebarInset className="bg-dark-bg">
+      {showOnboarding && user && (
+        <OnboardingFlow onComplete={handleOnboardingComplete} userName={user.user_metadata?.full_name || user.email || ""} />
+      )}
       {/* Header */}
       <header className="flex h-16 shrink-0 items-center gap-2 border-b border-dark-border bg-dark-card/50 backdrop-blur-sm px-4">
         <SidebarTrigger className="-ml-1 text-white hover:bg-dark-card" />
@@ -361,6 +488,14 @@ export default function DashboardPage() {
           <h1 className="text-lg font-semibold text-white">Market Intelligence Dashboard</h1>
         </div>
         <div className="ml-auto flex items-center gap-2">
+          <Button
+            onClick={() => setIsWidgetSelectorOpen(true)}
+            variant="outline"
+            className="bg-dark-card/20 border border-dark-border text-white hover:bg-dark-card/50"
+          >
+            <Settings2 className="w-4 h-4 mr-2" />
+            Customize
+          </Button>
           <Button
             onClick={handleRefresh}
             disabled={isRefreshing}
@@ -374,53 +509,133 @@ export default function DashboardPage() {
 
       {/* Main Content */}
       <div className="flex flex-1 flex-col gap-6 p-6">
-        {/* KPI Cards */}
-        {isRefreshing && kpiData.length === 0 ? (
-          <div className="md:col-span-2 lg:col-span-4">
-            <Card className="bg-dark-card border-dark-border">
-              <CardContent className="p-6 text-center text-gray-400">
-                Loading KPI data...
-              </CardContent>
-            </Card>
-          </div>
-        ) : !isRefreshing && kpiData.length === 0 ? (
-          <div className="md:col-span-2 lg:col-span-4">
-            <Card className="bg-dark-card border-dark-border">
-              <CardContent className="p-6 text-center text-gray-400">
-                No KPI data available.
-              </CardContent>
-            </Card>
-          </div>
-        ) : (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-            {kpiData.map((kpi, index) => (
-              <KPICard key={kpi.title || index} {...kpi} />
-            ))}
+        {enabledWidgets.includes("kpiCards") && (
+          <>
+            {/* KPI Cards */}
+            {isRefreshing && kpiData.length === 0 ? (
+              <div className="md:col-span-2 lg:col-span-4">
+                <Card className="bg-dark-card border-dark-border">
+                  <CardContent className="p-6 text-center text-gray-400">
+                    Loading KPI data...
+                  </CardContent>
+                </Card>
+              </div>
+            ) : !isRefreshing && kpiData.length === 0 ? (
+              <div className="md:col-span-2 lg:col-span-4">
+                <Card className="bg-dark-card border-dark-border">
+                  <CardContent className="p-6 text-center text-gray-400">
+                    No KPI data available.
+                  </CardContent>
+                </Card>
+              </div>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                {kpiData.map((kpi, index) => (
+                  <KPICard key={kpi.title || index} {...kpi} onViewHistory={handleViewKpiHistory} />
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {enabledWidgets.includes("trendImpactChart") && enabledWidgets.includes("marketShareChart") && (
+          <div className="grid gap-6 md:grid-cols-2">
+            {/* Trend Impact Chart */}
+            {enabledWidgets.includes("trendImpactChart") && (
+              <Card className="bg-dark-card border-dark-border">
+                <CardHeader>
+                  <CardTitle className="text-white flex items-center gap-2">
+                    <TrendingUp className="w-5 h-5 text-neon-blue" />
+                    Identified Trends Impact
+                  </CardTitle>
+                  <CardDescription className="text-gray-400">Estimated impact of key market trends</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ResponsiveContainer width="100%" height={300}>
+                    <BarChart data={trendsChartDataState}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#404040" />
+                      <XAxis dataKey="name" stroke="#9CA3AF" angle={-30} textAnchor="end" height={70} interval={0} />
+                      <YAxis
+                        stroke="#9CA3AF"
+                        domain={[0, 3]}
+                        ticks={[0, 1, 2, 3]}
+                        tickFormatter={(value) => ['N/A', 'Low', 'Medium', 'High'][value]}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "#2C2C2C",
+                          border: "1px solid #404040",
+                          borderRadius: "8px",
+                          color: "#fff",
+                        }}
+                        formatter={(value: number) => {
+                          const level = ['N/A', 'Low', 'Medium', 'High'][value];
+                          return [level, "Impact"];
+                        }}
+                      />
+                      <Bar dataKey="impact" name="Impact Level" fill={chartColors[0] || '#00FFFF'} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Market Share Chart */}
+            {enabledWidgets.includes("marketShareChart") && (
+              <Card className="bg-dark-card border-dark-border">
+                <CardHeader>
+                  <CardTitle className="text-white flex items-center gap-2">
+                    <PieChart className="w-5 h-5 text-neon-pink" />
+                    Market Share
+                  </CardTitle>
+                  <CardDescription className="text-gray-400">Current market distribution</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ResponsiveContainer width="100%" height={300}>
+                    <RechartsPieChart>
+                      <Pie
+                        data={marketShareDataState} // Use state variable
+                        cx="50%"
+                        cy="50%"
+                        outerRadius={80}
+                        dataKey="value"
+                        label={({ name, value }) => `${name}: ${value.toFixed(1)}%`}
+                      >
+                        {marketShareDataState.map((entry, index) => ( // Use state variable
+                          <Cell key={`cell-${index}`} fill={chartColors[index % chartColors.length]} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "#2C2C2C",
+                          border: "1px solid #404040",
+                          borderRadius: "8px",
+                          color: "#fff",
+                        }}
+                      />
+                    </RechartsPieChart>
+                  </ResponsiveContainer>
+                </CardContent>
+              </Card>
+            )}
           </div>
         )}
 
-        {/* Charts Section */}
-        <div className="grid gap-6 md:grid-cols-2">
-          {/* Trend Impact Chart */}
+        {enabledWidgets.includes("competitorActivity") && (
           <Card className="bg-dark-card border-dark-border">
             <CardHeader>
               <CardTitle className="text-white flex items-center gap-2">
-                <TrendingUp className="w-5 h-5 text-neon-blue" />
-                Identified Trends Impact
+                <Users className="w-5 h-5 text-neon-green" />
+                Competitor Activity
               </CardTitle>
-              <CardDescription className="text-gray-400">Estimated impact of key market trends</CardDescription>
+              <CardDescription className="text-gray-400">Recent competitor performance and growth rates</CardDescription>
             </CardHeader>
             <CardContent>
               <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={trendsChartDataState}>
+                <BarChart data={competitorActivityDataState}> {/* Use state variable */}
                   <CartesianGrid strokeDasharray="3 3" stroke="#404040" />
-                  <XAxis dataKey="name" stroke="#9CA3AF" angle={-30} textAnchor="end" height={70} interval={0} />
-                  <YAxis
-                    stroke="#9CA3AF"
-                    domain={[0, 3]}
-                    ticks={[0, 1, 2, 3]}
-                    tickFormatter={(value) => ['N/A', 'Low', 'Medium', 'High'][value]}
-                  />
+                  <XAxis dataKey="name" stroke="#9CA3AF" />
+                  <YAxis stroke="#9CA3AF" />
                   <Tooltip
                     contentStyle={{
                       backgroundColor: "#2C2C2C",
@@ -428,87 +643,17 @@ export default function DashboardPage() {
                       borderRadius: "8px",
                       color: "#fff",
                     }}
-                    formatter={(value: number) => {
-                      const level = ['N/A', 'Low', 'Medium', 'High'][value];
-                      return [level, "Impact"];
-                    }}
                   />
-                  <Bar dataKey="impact" name="Impact Level" fill={chartColors[0] || '#00FFFF'} />
+                  <Bar dataKey="activity" fill={chartColors[1]} name="Activity Score" />
+                  <Bar dataKey="growth" fill={chartColors[2]} name="Growth Rate %" />
                 </BarChart>
               </ResponsiveContainer>
             </CardContent>
           </Card>
-
-          {/* Market Share Chart */}
-          <Card className="bg-dark-card border-dark-border">
-            <CardHeader>
-              <CardTitle className="text-white flex items-center gap-2">
-                <PieChart className="w-5 h-5 text-neon-pink" />
-                Market Share
-              </CardTitle>
-              <CardDescription className="text-gray-400">Current market distribution</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <ResponsiveContainer width="100%" height={300}>
-                <RechartsPieChart>
-                  <Pie
-                    data={marketShareDataState} // Use state variable
-                    cx="50%"
-                    cy="50%"
-                    outerRadius={80}
-                    dataKey="value"
-                    label={({ name, value }) => `${name}: ${value.toFixed(1)}%`}
-                  >
-                    {marketShareDataState.map((entry, index) => ( // Use state variable
-                      <Cell key={`cell-${index}`} fill={chartColors[index % chartColors.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "#2C2C2C",
-                      border: "1px solid #404040",
-                      borderRadius: "8px",
-                      color: "#fff",
-                    }}
-                  />
-                </RechartsPieChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Competitor Activity */}
-        <Card className="bg-dark-card border-dark-border">
-          <CardHeader>
-            <CardTitle className="text-white flex items-center gap-2">
-              <Users className="w-5 h-5 text-neon-green" />
-              Competitor Activity
-            </CardTitle>
-            <CardDescription className="text-gray-400">Recent competitor performance and growth rates</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={competitorActivityDataState}> {/* Use state variable */}
-                <CartesianGrid strokeDasharray="3 3" stroke="#404040" />
-                <XAxis dataKey="name" stroke="#9CA3AF" />
-                <YAxis stroke="#9CA3AF" />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: "#2C2C2C",
-                    border: "1px solid #404040",
-                    borderRadius: "8px",
-                    color: "#fff",
-                  }}
-                />
-                <Bar dataKey="activity" fill={chartColors[1]} name="Activity Score" />
-                <Bar dataKey="growth" fill={chartColors[2]} name="Growth Rate %" />
-              </BarChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
+        )}
 
         {/* Development Progress (Show in development) */}
-        {process.env.NODE_ENV === 'development' && (
+        {enabledWidgets.includes("developmentProgress") && process.env.NODE_ENV === 'development' && (
           <Card className="bg-dark-card border-dark-border">
             <CardHeader>
               <CardTitle className="text-white flex items-center gap-2">
@@ -523,164 +668,77 @@ export default function DashboardPage() {
           </Card>
         )}
 
-        {/* Quick Actions */}
-        <div className="grid gap-4 md:grid-cols-3">
-          <Card
-            className="bg-dark-card border-dark-border hover:border-neon-blue/50 transition-all duration-300 cursor-pointer group"
-            onClick={() => setIsAnalysisDialogOpen(true)}
-          >
-            <CardContent className="p-6">
-              <div className="flex items-center gap-4">
-                <div className="p-3 rounded-lg bg-neon-blue/20 group-hover:bg-neon-blue/30 transition-colors">
-                  <Target className="w-6 h-6 text-neon-blue" />
+        {enabledWidgets.includes("quickActions") && (
+          <div className="grid gap-4 md:grid-cols-3">
+            <Card
+              className="bg-dark-card border-dark-border hover:border-neon-blue/50 transition-all duration-300 cursor-pointer group"
+              onClick={() => setIsAnalysisDialogOpen(true)}
+            >
+              <CardContent className="p-6">
+                <div className="flex items-center gap-4">
+                  <div className="p-3 rounded-lg bg-neon-blue/20 group-hover:bg-neon-blue/30 transition-colors">
+                    <Target className="w-6 h-6 text-neon-blue" />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-white">Generate Report</h3>
+                    <p className="text-sm text-gray-400">Create comprehensive market analysis</p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="font-semibold text-white">Generate Report</h3>
-                  <p className="text-sm text-gray-400">Create comprehensive market analysis</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
 
-          <Card
-            className="bg-dark-card border-dark-border hover:border-neon-green/50 transition-all duration-300 cursor-pointer group"
-            onClick={() => setIsAiInsightsDialogOpen(true)}
-          >
-            <CardContent className="p-6">
-              <div className="flex items-center gap-4">
-                <div className="p-3 rounded-lg bg-neon-green/20 group-hover:bg-neon-green/30 transition-colors">
-                  <Zap className="w-6 h-6 text-neon-green" />
+            <Card
+              className="bg-dark-card border-dark-border hover:border-neon-green/50 transition-all duration-300 cursor-pointer group"
+              onClick={() => setIsAiInsightsDialogOpen(true)}
+            >
+              <CardContent className="p-6">
+                <div className="flex items-center gap-4">
+                  <div className="p-3 rounded-lg bg-neon-green/20 group-hover:bg-neon-green/30 transition-colors">
+                    <Zap className="w-6 h-6 text-neon-green" />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-white">AI Insights</h3>
+                    <p className="text-sm text-gray-400">Get AI-powered recommendations</p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="font-semibold text-white">AI Insights</h3>
-                  <p className="text-sm text-gray-400">Get AI-powered recommendations</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
 
-          <Card
-            className="bg-dark-card border-dark-border hover:border-neon-pink/50 transition-all duration-300 cursor-pointer group"
-            onClick={handleExportKpiData}
-          >
-            <CardContent className="p-6">
-              <div className="flex items-center gap-4">
-                <div className="p-3 rounded-lg bg-neon-pink/20 group-hover:bg-neon-pink/30 transition-colors">
-                  <Briefcase className="w-6 h-6 text-neon-pink" />
+            <Card
+              className="bg-dark-card border-dark-border hover:border-neon-pink/50 transition-all duration-300 cursor-pointer group"
+              onClick={handleExportKpiData}
+            >
+              <CardContent className="p-6">
+                <div className="flex items-center gap-4">
+                  <div className="p-3 rounded-lg bg-neon-pink/20 group-hover:bg-neon-pink/30 transition-colors">
+                    <Briefcase className="w-6 h-6 text-neon-pink" />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-white">Export Data</h3>
+                    <p className="text-sm text-gray-400">Download reports and datasets</p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="font-semibold text-white">Export Data</h3>
-                  <p className="text-sm text-gray-400">Download reports and datasets</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
       </div>
 
-      {/* Generate Report Dialog */}
-      <Dialog open={isAnalysisDialogOpen} onOpenChange={setIsAnalysisDialogOpen}>
-        <DialogContent className="bg-dark-card border-dark-border text-white sm:max-w-[525px]">
-          <DialogHeader>
-            <DialogTitle className="text-neon-blue">Generate New Market Analysis</DialogTitle>
-            <DialogDescription>
-              Enter the details for your market analysis report. The agent will begin processing once submitted.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <div className="grid items-center grid-cols-4 gap-4">
-              <Label htmlFor="analysisQueryDialog" className="text-right col-span-1">Query*</Label>
-              <Input
-                id="analysisQueryDialog"
-                value={analysisQuery}
-                onChange={(e) => setAnalysisQuery(e.target.value)}
-                placeholder="e.g., AI impact on EdTech"
-                className="col-span-3 bg-dark-bg border-dark-border placeholder:text-gray-500"
-              />
-            </div>
-            <div className="grid items-center grid-cols-4 gap-4">
-              <Label htmlFor="analysisMarketDomainDialog" className="text-right col-span-1">Market Domain*</Label>
-              <Input
-                id="analysisMarketDomainDialog"
-                value={analysisMarketDomain}
-                onChange={(e) => setAnalysisMarketDomain(e.target.value)}
-                placeholder="e.g., EdTech, FinTech"
-                className="col-span-3 bg-dark-bg border-dark-border placeholder:text-gray-500"
-              />
-            </div>
-            <div className="grid items-center grid-cols-4 gap-4">
-              <Label htmlFor="analysisQuestionDialog" className="text-right col-span-1">Question (Optional)</Label>
-              <Input
-                id="analysisQuestionDialog"
-                value={analysisQuestion}
-                onChange={(e) => setAnalysisQuestion(e.target.value)}
-                placeholder="e.g., Key investment areas?"
-                className="col-span-3 bg-dark-bg border-dark-border placeholder:text-gray-500"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <DialogClose asChild>
-              <Button variant="outline" className="border-gray-600 text-gray-300 hover:bg-dark-bg hover:text-white">Cancel</Button>
-            </DialogClose>
-            <Button onClick={handleGenerateReport} disabled={isGeneratingReport} className="bg-neon-blue hover:bg-neon-blue/90 text-white">
-              {isGeneratingReport ? "Generating..." : "Generate Analysis"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <WidgetSelectorDialog
+        isOpen={isWidgetSelectorOpen}
+        onOpenChange={setIsWidgetSelectorOpen}
+        currentEnabledWidgets={enabledWidgets}
+        onSave={handleSaveWidgets}
+      />
 
-      {/* AI Insights Dialog */}
-      <Dialog open={isAiInsightsDialogOpen} onOpenChange={setIsAiInsightsDialogOpen}>
-        <DialogContent className="bg-dark-card border-dark-border text-white sm:max-w-[525px]">
-          <DialogHeader>
-            <DialogTitle className="text-neon-green">Get AI-Powered Insights</DialogTitle>
-            <DialogDescription>
-              Describe your area of interest to receive AI-powered recommendations and insights.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <div className="grid items-center grid-cols-4 gap-4">
-              <Label htmlFor="aiInsightsQueryDialog" className="text-right col-span-1">Query*</Label>
-              <Input
-                id="aiInsightsQueryDialog"
-                value={aiInsightsQuery}
-                onChange={(e) => setAiInsightsQuery(e.target.value)}
-                placeholder="e.g., Future of remote work"
-                className="col-span-3 bg-dark-bg border-dark-border placeholder:text-gray-500"
-              />
-            </div>
-            <div className="grid items-center grid-cols-4 gap-4">
-              <Label htmlFor="aiInsightsMarketDomainDialog" className="text-right col-span-1">Market Domain*</Label>
-              <Input
-                id="aiInsightsMarketDomainDialog"
-                value={aiInsightsMarketDomain}
-                onChange={(e) => setAiInsightsMarketDomain(e.target.value)}
-                placeholder="e.g., Human Resources, SaaS"
-                className="col-span-3 bg-dark-bg border-dark-border placeholder:text-gray-500"
-              />
-            </div>
-            <div className="grid items-center grid-cols-4 gap-4">
-              <Label htmlFor="aiInsightsSpecificQuestionDialog" className="text-right col-span-1">Specific Question (Optional)</Label>
-              <Input
-                id="aiInsightsSpecificQuestionDialog"
-                value={aiInsightsSpecificQuestion}
-                onChange={(e) => setAiInsightsSpecificQuestion(e.target.value)}
-                placeholder="e.g., What are emerging collaboration tools?"
-                className="col-span-3 bg-dark-bg border-dark-border placeholder:text-gray-500"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <DialogClose asChild>
-              <Button variant="outline" className="border-gray-600 text-gray-300 hover:bg-dark-bg hover:text-white">Cancel</Button>
-            </DialogClose>
-            <Button onClick={handleGetAiInsights} disabled={isGeneratingAiInsights} className="bg-neon-green hover:bg-neon-green/90 text-black">
-              {isGeneratingAiInsights ? "Generating Insights..." : "Get Insights"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </SidebarInset>
-  )
-}
+      {selectedKpiForHistory && (
+        <HistoricalKpiChartDialog
+          isOpen={isHistoricalKpiDialogOpen}
+          onOpenChange={setIsHistoricalKpiDialogOpen}
+          kpiTitle={selectedKpiForHistory.title}
+          historicalData={historicalKpiData}
+          unit={selectedKpiForHistory.unit}
+        />
+      )}
+
+      {/* Generate Report Dialog */}

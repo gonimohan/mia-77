@@ -1,7 +1,19 @@
-"use client"
-import Link from "next/link"
-import { usePathname } from "next/navigation"
-import { BarChart3, TrendingUp, Users, Eye, Database, Download, Settings, Search, Bell, Zap, LogOut } from "lucide-react" // Added LogOut
+"use client";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import {
+  BarChart3,
+  TrendingUp,
+  Users,
+  Eye,
+  Database,
+  Download,
+  Settings,
+  Search,
+  Bell,
+  Zap,
+  LogOut,
+} from "lucide-react"; // Added LogOut
 import { useAuth } from "./auth-provider"; // Added useAuth
 
 import {
@@ -17,9 +29,9 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
-} from "@/components/ui/sidebar"
-import { Button } from "@/components/ui/button"
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+} from "@/components/ui/sidebar";
+import { Button } from "@/components/ui/button";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 
 const menuItems = [
   {
@@ -58,10 +70,10 @@ const menuItems = [
     icon: Download,
     color: "text-neon-blue",
   },
-]
+];
 
 export function AppSidebar() {
-  const pathname = usePathname()
+  const pathname = usePathname();
   const { user, signOut } = useAuth(); // Added this line
 
   return (
@@ -72,8 +84,12 @@ export function AppSidebar() {
             <Zap className="w-5 h-5 text-white" />
           </div>
           <div className="flex flex-col">
-            <span className="text-lg font-bold text-white text-center">MIA </span>
-            <span className="text-xs text-gray-400">Market Intelligent Agent</span>
+            <span className="text-lg font-bold text-white text-center">
+              MIA{" "}
+            </span>
+            <span className="text-xs text-gray-400">
+              Market Intelligent Agent
+            </span>
           </div>
         </div>
 
@@ -90,11 +106,14 @@ export function AppSidebar() {
 
       <SidebarContent className="bg-dark-bg">
         <SidebarGroup>
-          <SidebarGroupLabel className="text-gray-400 text-xs uppercase tracking-wider">Analytics</SidebarGroupLabel>
+          <SidebarGroupLabel className="text-gray-400 text-xs uppercase tracking-wider">
+            Analytics
+          </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {menuItems.map((item) => {
-                const isActive = pathname === item.url
+                const isActive =
+                  pathname === item.url || pathname.startsWith(item.url + "/");
                 return (
                   <SidebarMenuItem key={item.title}>
                     <SidebarMenuButton
@@ -104,12 +123,18 @@ export function AppSidebar() {
                         group relative overflow-hidden transition-all duration-300
                         ${
                           isActive
-                            ? `bg-dark-card border border-opacity-50 ${item.color.replace("text-", "border-")} shadow-lg`
+                            ? `bg-dark-card border border-opacity-50 ${item.color.replace(
+                                "text-",
+                                "border-"
+                              )} shadow-lg`
                             : "hover:bg-dark-card hover:border hover:border-opacity-30 hover:border-gray-600"
                         }
                       `}
                     >
-                      <Link href={item.url} className="flex items-center gap-3 w-full">
+                      <Link
+                        href={item.url}
+                        className="flex items-center gap-3 w-full"
+                      >
                         <item.icon
                           className={`w-5 h-5 transition-all duration-300 ${
                             isActive
@@ -119,27 +144,34 @@ export function AppSidebar() {
                         />
                         <span
                           className={`font-medium transition-all duration-300 ${
-                            isActive ? "text-white font-semibold" : "text-gray-300 group-hover:text-white"
+                            isActive
+                              ? "text-white font-semibold"
+                              : "text-gray-300 group-hover:text-white"
                           }`}
                         >
                           {item.title}
                         </span>
                         {isActive && (
                           <div
-                            className={`absolute right-0 top-0 bottom-0 w-1 ${item.color.replace("text-", "bg-")} rounded-l-full`}
+                            className={`absolute right-0 top-0 bottom-0 w-1 ${item.color.replace(
+                              "text-",
+                              "bg-"
+                            )} rounded-l-full`}
                           />
                         )}
                       </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
-                )
+                );
               })}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
 
         <SidebarGroup>
-          <SidebarGroupLabel className="text-gray-400 text-xs uppercase tracking-wider">System</SidebarGroupLabel>
+          <SidebarGroupLabel className="text-gray-400 text-xs uppercase tracking-wider">
+            System
+          </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               <SidebarMenuItem>
@@ -165,7 +197,9 @@ export function AppSidebar() {
                     />
                     <span
                       className={`font-medium transition-all duration-300 ${
-                        pathname === "/settings" ? "text-white font-semibold" : "text-gray-300 group-hover:text-white"
+                        pathname === "/settings"
+                          ? "text-white font-semibold"
+                          : "text-gray-300 group-hover:text-white"
                       }`}
                     >
                       Settings
@@ -187,7 +221,11 @@ export function AppSidebar() {
             <SidebarMenuItem>
               <div className="flex items-center gap-3 px-2 py-3">
                 <Avatar className="w-8 h-8 border-2 border-neon-blue">
-                  <AvatarImage src={user.user_metadata?.avatar_url || "/placeholder-user.jpg"} />
+                  <AvatarImage
+                    src={
+                      user.user_metadata?.avatar_url || "/placeholder-user.jpg"
+                    }
+                  />
                   <AvatarFallback className="bg-neon-blue text-dark-bg font-bold">
                     {user.email?.charAt(0).toUpperCase() || "U"}
                   </AvatarFallback>
@@ -218,5 +256,5 @@ export function AppSidebar() {
 
       <SidebarRail />
     </Sidebar>
-  )
+  );
 }

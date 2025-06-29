@@ -1,79 +1,82 @@
-"use client"
+"use client";
 
-import type React from "react"
+import type React from "react";
 
-import { useState, useEffect } from "react" // Added useEffect
-import { useRouter } from "next/navigation"
-import Link from "next/link"
-import { Eye, EyeOff, Mail, Lock, LogIn } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Alert, AlertDescription } from "@/components/ui/alert"
-import { supabase } from "@/lib/supabase"
-import { useToast } from "@/hooks/use-toast"
-import { useAuth } from "@/components/auth-provider" // Added useAuth
+import { useState, useEffect } from "react"; // Added useEffect
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { Eye, EyeOff, Mail, Lock, LogIn } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { supabase } from "@/lib/supabase";
+import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/components/auth-provider"; // Added useAuth
 
 export default function LoginPage() {
-  const [email, setEmail] = useState("")
-  const [password, setPassword] = useState("")
-  const [showPassword, setShowPassword] = useState(false)
-  const [formLoading, setFormLoading] = useState(false) // Renamed to avoid conflict
-  const [error, setError] = useState("")
-  const router = useRouter()
-  const { toast } = useToast()
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [formLoading, setFormLoading] = useState(false); // Renamed to avoid conflict
+  const [error, setError] = useState("");
+  const router = useRouter();
+  const { toast } = useToast();
   const { user, loading: authLoading } = useAuth(); // Called useAuth
 
   useEffect(() => {
     if (!authLoading && user) {
-      router.push("/dashboard");
+      router.replace("/dashboard"); // Use replace for instant redirect
     }
   }, [user, authLoading, router]);
 
   const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setFormLoading(true) // Use renamed state setter
-    setError("")
+    e.preventDefault();
+    setFormLoading(true); // Use renamed state setter
+    setError("");
 
     try {
       const { data, error } = await supabase.auth.signInWithPassword({
         email,
         password,
-      })
+      });
 
       if (error) {
-        setError(error.message)
+        setError(error.message);
         toast({
           title: "Login Failed",
           description: error.message,
           variant: "destructive",
-        })
-        return
+        });
+        return;
       }
 
       if (data.user) {
         toast({
           title: "Login Successful",
           description: "Welcome back to Market Intelligence Dashboard!",
-        })
-        // Add a small delay to ensure auth state is updated
-        setTimeout(() => {
-          router.push("/dashboard")
-        }, 100)
+        });
       }
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : "An unexpected error occurred"
-      setError(errorMessage)
+      const errorMessage =
+        err instanceof Error ? err.message : "An unexpected error occurred";
+      setError(errorMessage);
       toast({
         title: "Login Error",
         description: errorMessage,
         variant: "destructive",
-      })
+      });
     } finally {
-      setFormLoading(false) // Use renamed state setter
+      setFormLoading(false); // Use renamed state setter
     }
-  }
+  };
 
   const handleGoogleLogin = async () => {
     try {
@@ -82,22 +85,27 @@ export default function LoginPage() {
         options: {
           redirectTo: `${window.location.origin}/dashboard`,
         },
-      })
+      });
 
       if (error) {
         toast({
           title: "Google Login Failed",
           description: error.message,
           variant: "destructive",
-        })
+        });
       }
     } catch (err) {
       toast({
         title: "Google Login Error",
         description: "Failed to initiate Google login",
         variant: "destructive",
-      })
+      });
     }
+  };
+
+  // Prevent showing login form if already authenticated
+  if (!authLoading && user) {
+    return null;
   }
 
   return (
@@ -109,12 +117,17 @@ export default function LoginPage() {
           <CardTitle className="text-2xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
             Welcome Back
           </CardTitle>
-          <CardDescription className="text-gray-300">Sign in to your Market Intelligence Dashboard</CardDescription>
+          <CardDescription className="text-gray-300">
+            Sign in to your Market Intelligence Dashboard
+          </CardDescription>
         </CardHeader>
 
         <CardContent className="space-y-4">
           {error && (
-            <Alert variant="destructive" className="border-red-500/50 bg-red-500/10">
+            <Alert
+              variant="destructive"
+              className="border-red-500/50 bg-red-500/10"
+            >
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           )}
@@ -160,7 +173,11 @@ export default function LoginPage() {
                   className="absolute right-0 top-0 h-full px-3 text-gray-400 hover:text-white"
                   onClick={() => setShowPassword(!showPassword)}
                 >
-                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  {showPassword ? (
+                    <EyeOff className="h-4 w-4" />
+                  ) : (
+                    <Eye className="h-4 w-4" />
+                  )}
                 </Button>
               </div>
             </div>
@@ -189,7 +206,9 @@ export default function LoginPage() {
               <span className="w-full border-t border-gray-600" />
             </div>
             <div className="relative flex justify-center text-xs uppercase">
-              <span className="bg-black/40 px-2 text-gray-400">Or continue with</span>
+              <span className="bg-black/40 px-2 text-gray-400">
+                Or continue with
+              </span>
             </div>
           </div>
 
@@ -222,12 +241,15 @@ export default function LoginPage() {
 
           <div className="text-center text-sm text-gray-400">
             Don't have an account?{" "}
-            <Link href="/register" className="text-purple-400 hover:text-purple-300 underline">
+            <Link
+              href="/register"
+              className="text-purple-400 hover:text-purple-300 underline"
+            >
               Sign up
             </Link>
           </div>
         </CardContent>
       </Card>
     </div>
-  )
+  );
 }

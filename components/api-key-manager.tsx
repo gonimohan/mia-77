@@ -25,7 +25,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { useToast } from "@/hooks/use-toast"
+import { addApiKey, updateApiKey, deleteApiKey, ApiError } from "@/lib/api"
 
 // Define DataSourceFromParent based on app/data-integration/page.tsx state
 interface DataSourceFromParent {
@@ -94,6 +94,21 @@ export function APIKeyManager({
   })
   
   const { toast } = useToast()
+
+  const handleApiError = (error: any, context: string) => {
+    console.error(`${context} error:`, error)
+    let description = "An unexpected error occurred."
+    if (error instanceof ApiError) {
+      description = error.detail?.detail || error.message
+    } else if (error instanceof Error) {
+      description = error.message
+    }
+    toast({
+      title: `${context} Failed`,
+      description,
+      variant: "destructive",
+    })
+  }
 
   const processedApiKeys: ProcessedKey[] = dataSources.map(ds => {
     const dsCategory = ds.category?.toLowerCase() || ds.type?.toLowerCase() || "general";
@@ -221,8 +236,11 @@ export function APIKeyManager({
 
     setIsSubmitting(true)
     try {
-      // Simulate API call delay
-      await new Promise(resolve => setTimeout(resolve, 1000))
+      if (editingKey) {
+        await updateApiKey(editingKey.id, formData)
+      } else {
+        await addApiKey(formData)
+      }
       
       toast({
         title: "Success",
@@ -232,11 +250,7 @@ export function APIKeyManager({
       setIsDialogOpen(false)
       onRefreshData() // Refresh the data sources
     } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to save API key. Please try again.",
-        variant: "destructive",
-      })
+      handleApiError(error, editingKey ? "Update API Key" : "Add API Key")
     } finally {
       setIsSubmitting(false)
     }
@@ -247,8 +261,7 @@ export function APIKeyManager({
     
     setIsSubmitting(true)
     try {
-      // Simulate API call delay
-      await new Promise(resolve => setTimeout(resolve, 500))
+      await deleteApiKey(deletingKey.id)
       
       toast({
         title: "Success",
@@ -259,11 +272,7 @@ export function APIKeyManager({
       setDeletingKey(null)
       onRefreshData() // Refresh the data sources
     } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to delete API key. Please try again.",
-        variant: "destructive",
-      })
+      handleApiError(error, "Delete API Key")
     } finally {
       setIsSubmitting(false)
     }
@@ -272,6 +281,7 @@ export function APIKeyManager({
   const handleToggleStatus = async (apiKey: ProcessedKey) => {
     try {
       const newStatus = apiKey.status === "active" ? "inactive" : "active"
+      await updateApiKey(apiKey.id, { status: newStatus })
       
       toast({
         title: "Status Updated",
@@ -280,11 +290,7 @@ export function APIKeyManager({
       
       onRefreshData() // Refresh the data sources
     } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to update status. Please try again.",
-        variant: "destructive",
-      })
+      handleApiError(error, "Update Status")
     }
   }
 

@@ -25,8 +25,6 @@ interface CustomerSegment {
   lifetime_value: string
 }
 
-// const mockCustomerInsights: CustomerSegment[] = [ ... ] // This line and the mock data array are removed.
-
 export default function CustomerInsightsPage() {
   const { getChartColors } = useColorPalette()
   const chartColors = getChartColors()
@@ -62,6 +60,11 @@ export default function CustomerInsightsPage() {
     } catch (error) {
       console.error("Failed to fetch or transform customer insights:", error);
       setInsights([]);
+      toast({
+        title: "Customer Insights Error",
+        description: "Failed to load customer insights data.",
+        variant: "destructive",
+      });
     } finally {
       setLoading(false);
     }

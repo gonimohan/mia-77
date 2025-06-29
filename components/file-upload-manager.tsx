@@ -25,6 +25,7 @@ import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { useToast } from "@/hooks/use-toast"
 import { useAuth } from "@/components/auth-provider"
+import { apiClient, ApiError, uploadFile, fetchFiles, fetchFileDetails, deleteFile, generateReport } from "@/lib/api"
 
 interface UploadedFile {
   file_id: string
@@ -47,50 +48,36 @@ export function FileUploadManager({ onFileAnalyzed }: FileUploadManagerProps) {
   const [uploadProgress, setUploadProgress] = useState(0)
   const [isLoadingFiles, setIsLoadingFiles] = useState(false)
   const { toast } = useToast()
-  const { user, supabaseClient } = useAuth()
+  const { user } = useAuth()
 
-  const getAuthToken = async () => {
-    if (!supabaseClient) return null
-    const { data: { session } } = await supabaseClient.auth.getSession()
-    return session?.access_token
+  const handleApiError = (error: any, context: string) => {
+    console.error(`${context} error:`, error)
+    let description = "An unexpected error occurred."
+    if (error instanceof ApiError) {
+      description = error.detail?.detail || error.message
+    } else if (error instanceof Error) {
+      description = error.message
+    }
+    toast({
+      title: `${context} Failed`,
+      description,
+      variant: "destructive",
+    })
   }
 
-  const fetchUploadedFiles = async () => {
+  const fetchUploadedFiles = useCallback(async () => {
     if (!user) return
 
     setIsLoadingFiles(true)
     try {
-      const token = await getAuthToken()
-      if (!token) {
-        toast({
-          title: "Authentication Error",
-          description: "Please log in to view files.",
-          variant: "destructive"
-        })
-        return
-      }
-
-      const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL}/api/files`, {
-        headers: { Authorization: `Bearer ${token}` }
-      })
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch files: ${response.statusText}`)
-      }
-
-      const result = await response.json()
+      const result = await fetchFiles()
       setUploadedFiles(result.files || [])
-    } catch (error: any) {
-      console.error("Failed to fetch files:", error)
-      toast({
-        title: "Error",
-        description: error.message || "Failed to load uploaded files.",
-        variant: "destructive"
-      })
+    } catch (error) {
+      handleApiError(error, "Fetch Files")
     } finally {
       setIsLoadingFiles(false)
     }
-  }
+  }, [user, toast])
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     if (!user) {
@@ -105,8 +92,7 @@ export function FileUploadManager({ onFileAnalyzed }: FileUploadManagerProps) {
     const file = acceptedFiles[0]
     if (!file) return
 
-    // Validate file type
-    const allowedTypes = ['.pdf', '.docx', '.txt', '.csv', '.xlsx'] // Updated
+    const allowedTypes = ['.pdf', '.docx', '.txt', '.csv', '.xlsx']
     const fileExtension = '.' + file.name.split('.').pop()?.toLowerCase()
 
     if (!allowedTypes.includes(fileExtension)) {
@@ -118,11 +104,10 @@ export function FileUploadManager({ onFileAnalyzed }: FileUploadManagerProps) {
       return
     }
 
-    // Validate file size (50MB limit as per backend)
-    if (file.size > 50 * 1024 * 1024) { // Updated to 50MB
+    if (file.size > 50 * 1024 * 1024) {
       toast({
         title: "File Too Large",
-        description: "Please upload files smaller than 50MB.", // Updated message
+        description: "Please upload files smaller than 50MB.",
         variant: "destructive"
       })
       return
@@ -132,68 +117,36 @@ export function FileUploadManager({ onFileAnalyzed }: FileUploadManagerProps) {
     setUploadProgress(0)
 
     try {
-      const token = await getAuthToken()
-      if (!token) {
-        throw new Error("Authentication token not available")
-      }
-
       const formData = new FormData()
       formData.append('file', file)
       formData.append('analysis_type', 'comprehensive')
 
-      // Simulate upload progress
       const progressInterval = setInterval(() => {
         setUploadProgress(prev => Math.min(prev + 10, 90))
       }, 100)
 
-      const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL}/api/upload`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData
-      })
+      const result = await uploadFile(formData)
 
       clearInterval(progressInterval)
       setUploadProgress(100)
-
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.detail || `Upload failed: ${response.statusText}`)
-      }
-
-      const result = await response.json() // Expects { message, document_id, original_filename, internal_filename }
 
       toast({
         title: "Upload Initiated",
         description: `${result.original_filename} uploaded. Document ID: ${result.document_id}. Processing in background.`,
         duration: 5000
       })
-      setLastUploadedDocId(result.document_id); // Store the ID of the last uploaded file
+      setLastUploadedDocId(result.document_id);
+      
+      // Refresh file list after a short delay to allow processing to start
+      setTimeout(fetchUploadedFiles, 2000)
 
-      // The 'result' here is from the /api/upload endpoint.
-      // It's not the full "UploadedFile" structure that the list below expects.
-      // The list is populated by fetchUploadedFiles from /api/files (Supabase).
-      // So, we won't add this partial result to setUploadedFiles directly.
-      // The user will see the file in the list after a "Refresh".
-
-      // If onFileAnalyzed expects the *final* analyzed data, we can't call it here.
-      // If it's just to notify that an upload started, we could pass `result`.
-      // For now, I'll assume onFileAnalyzed is for when analysis is complete, so I won't call it.
-      // if (onFileAnalyzed) {
-      //   onFileAnalyzed(result); // This would need adjustment if `result` structure is different
-      // }
-
-    } catch (error: any) {
-      console.error("Upload error:", error)
-      toast({
-        title: "Upload Failed",
-        description: error.message || "Failed to upload file. Please try again.",
-        variant: "destructive"
-      })
+    } catch (error) {
+      handleApiError(error, "Upload")
     } finally {
       setUploading(false)
       setUploadProgress(0)
     }
-  }, [user, onFileAnalyzed, toast])
+  }, [user, onFileAnalyzed, toast, fetchUploadedFiles])
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -281,31 +234,13 @@ export function FileUploadManager({ onFileAnalyzed }: FileUploadManagerProps) {
 
   const handleViewFile = async (fileId: string) => {
     try {
-      const token = await getAuthToken()
-      if (!token) return
-
-      const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL}/api/files/${fileId}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      })
-
-      if (!response.ok) {
-        throw new Error('Failed to fetch file details')
-      }
-
-      const fileDetails = await response.json()
-
-      // For now, show a simple alert with file details
-      // In a real app, you'd open a modal with detailed view
+      const fileDetails = await fetchFileDetails(fileId)
       toast({
         title: "File Details",
         description: `${fileDetails.filename} - ${formatFileSize(fileDetails.file_size)}`,
       })
-    } catch (error: any) {
-      toast({
-        title: "Error",
-        description: "Failed to load file details.",
-        variant: "destructive"
-      })
+    } catch (error) {
+      handleApiError(error, "View File")
     }
   }
 
@@ -313,54 +248,24 @@ export function FileUploadManager({ onFileAnalyzed }: FileUploadManagerProps) {
     if (!confirm(`Are you sure you want to delete ${filename}?`)) return
 
     try {
-      const token = await getAuthToken()
-      if (!token) return
-
-      // Note: Delete endpoint would need to be implemented in backend
+      await deleteFile(fileId)
       toast({
-        title: "Delete Feature",
-        description: "File deletion will be implemented in the next update.",
+        title: "Success",
+        description: `${filename} has been deleted.`,
       })
-    } catch (error: any) {
-      toast({
-        title: "Error",
-        description: "Failed to delete file.",
-        variant: "destructive"
-      })
+      fetchUploadedFiles() // Refresh the list
+    } catch (error) {
+      handleApiError(error, "Delete File")
     }
   }
 
-  const handleGenerateReport = async (documentId: string) => { // Changed fileId to documentId
+  const handleGenerateReport = async (documentId: string) => {
     if (!documentId) {
       toast({ title: "Error", description: "Document ID is missing.", variant: "destructive" });
       return;
     }
     try {
-      const token = await getAuthToken() // Assuming this is still needed if the endpoint is protected
-      if (!token && process.env.NODE_ENV !== 'development') { // Allow no token in dev if unprotected
-         toast({ title: "Authentication Error", description: "Cannot generate report.", variant: "destructive" });
-         return;
-      }
-
-      const headers: HeadersInit = {};
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`;
-      }
-
-      const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL}/api/agent/generate-report/${documentId}`, {
-        method: 'GET', // Changed to GET
-        headers: headers
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ detail: "Failed to retrieve report details." }));
-        throw new Error(errorData.detail || `Failed to generate report: ${response.statusText}`);
-      }
-
-      const reportData = await response.json();
-
-      // Display the report in a more structured way (e.g., modal or new section)
-      // For now, using a toast with stringified JSON for simplicity
+      const reportData = await generateReport(documentId)
       toast({
         title: `Report for ${reportData.original_filename || documentId}`,
         description: (
@@ -368,36 +273,21 @@ export function FileUploadManager({ onFileAnalyzed }: FileUploadManagerProps) {
             <code className="text-white">{JSON.stringify(reportData, null, 2)}</code>
           </pre>
         ),
-        duration: 10000 // Keep toast longer for viewing data
+        duration: 10000
       });
-
-      // No need to refreshUploadedFiles here as this fetches a specific report, not updating the list item's state directly
-    } catch (error: any) {
-      console.error("Report generation error:", error);
-      toast({
-        title: "Report Generation Failed",
-        description: error.message || "Could not generate report.",
-        variant: "destructive"
-      });
+    } catch (error) {
+      handleApiError(error, "Generate Report")
     }
   }
 
-  // Keep track of the last uploaded document ID to offer generating its report
   const [lastUploadedDocId, setLastUploadedDocId] = useState<string | null>(null);
-  // Update onDrop to set this
-  // ... in onDrop success block:
-  // setLastUploadedDocId(result.document_id); // This will be added in the onDrop success part
-
-  // And the text for the dropzone message:
   const dropzoneMessage = "Supports PDF, DOCX, TXT, CSV, XLSX (max 50MB)";
 
-
-  // Load files on component mount
   React.useEffect(() => {
     if (user) {
       fetchUploadedFiles()
     }
-  }, [user])
+  }, [user, fetchUploadedFiles])
 
   return (
     <div className="space-y-6">

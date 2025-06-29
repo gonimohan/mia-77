@@ -51,7 +51,13 @@ interface DataSource {
   type: string;
   status: "active" | "inactive" | "error" | string;
   last_sync?: string | null;
-  config: Record<string, any>;
+  config: {
+    endpoint?: string;
+    apiKey?: string;
+    auth_type?: "none" | "bearer" | "basic" | "custom";
+    headers?: Record<string, string>;
+    [key: string]: any; // Allow other properties
+  };
   description?: string | null;
   category?: "news" | "financial" | "search" | "ai" | string | null;
   user_id?: string;
@@ -75,6 +81,8 @@ export default function DataIntegrationPage() {
     category: "",
     endpoint: "",
     apiKey: "",
+    authType: "none", // New field
+    headers: "", // New field (JSON string)
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -234,7 +242,7 @@ export default function DataIntegrationPage() {
 
   const handleOpenAddDialog = () => {
     setEditingSource(null);
-    setCurrentFormData({ name: "", type: "api", description: "", category: "", endpoint: "", apiKey: "" });
+    setCurrentFormData({ name: "", type: "api", description: "", category: "", endpoint: "", apiKey: "", authType: "none", headers: "" });
     setIsModifyDialogOpen(true);
   };
 
@@ -247,6 +255,8 @@ export default function DataIntegrationPage() {
       category: source.category || "",
       endpoint: source.config?.endpoint || "",
       apiKey: "", // Keep API key blank for edit forms for security, backend should handle partial updates
+      authType: source.config?.auth_type || "none",
+      headers: source.config?.headers ? JSON.stringify(source.config.headers, null, 2) : "",
     });
     setIsModifyDialogOpen(true);
   };
@@ -264,6 +274,21 @@ export default function DataIntegrationPage() {
       return;
     }
 
+    let parsedHeaders = {};
+    if (currentFormData.headers) {
+      try {
+        parsedHeaders = JSON.parse(currentFormData.headers);
+      } catch (e) {
+        toast({
+          title: "Invalid Headers JSON",
+          description: "Please ensure Custom Headers is a valid JSON object.",
+          variant: "destructive",
+        });
+        setIsSubmitting(false);
+        return;
+      }
+    }
+
     const payload: Partial<DataSource> & { config: Record<string, any> } = {
       name: currentFormData.name,
       type: currentFormData.type,
@@ -271,6 +296,8 @@ export default function DataIntegrationPage() {
       category: currentFormData.category || null,
       config: {
         endpoint: currentFormData.endpoint,
+        auth_type: currentFormData.authType,
+        headers: parsedHeaders,
       },
     };
     // Only include apiKey in the payload if it's provided (for new sources or if explicitly changed)
@@ -715,6 +742,22 @@ export default function DataIntegrationPage() {
             <div className="grid gap-2">
               <Label htmlFor="sourceApiKey">Config: API Key (optional)</Label>
               <Input id="sourceApiKey" type="password" value={currentFormData.apiKey} onChange={(e) => setCurrentFormData({...currentFormData, apiKey: e.target.value})} className="bg-dark-bg border-dark-border" />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="sourceAuthType">Config: Authentication Type</Label>
+              <Select value={currentFormData.authType} onValueChange={(value) => setCurrentFormData({...currentFormData, authType: value as "none" | "bearer" | "basic" | "custom"})}>
+                <SelectTrigger className="bg-dark-bg border-dark-border"><SelectValue /></SelectTrigger>
+                <SelectContent className="bg-dark-card border-dark-border">
+                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem value="bearer">Bearer Token</SelectItem>
+                  <SelectItem value="basic">Basic Auth</SelectItem>
+                  <SelectItem value="custom">Custom</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="sourceHeaders">Config: Custom Headers (JSON)</Label>
+              <Input id="sourceHeaders" value={currentFormData.headers} onChange={(e) => setCurrentFormData({...currentFormData, headers: e.target.value})} className="bg-dark-bg border-dark-border" placeholder="e.g., {\"X-Custom-Header\": \"value\"}" />
             </div>
           </div>
           <DialogFooter>

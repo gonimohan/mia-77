@@ -4,7 +4,6 @@ import { type NextRequest, NextResponse } from 'next/server';
 const publicPaths = [
   '/login',
   '/register',
-  '/', // Root page
   '/auth/callback',
 ];
 

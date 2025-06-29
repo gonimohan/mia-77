@@ -120,13 +120,11 @@ export default function ChatPage() {
       // Prepare enhanced context with file information
       const contextFiles = fileContext.filter(file => selectedFiles.has(file.file_id));
       
-      const messagesForApi = [];
-      const lastAssistantMessage = messages.slice().reverse().find(msg => msg.role === 'assistant');
-      
-      if (lastAssistantMessage) {
-        messagesForApi.push({ role: 'assistant', content: lastAssistantMessage.text });
-      }
-      
+      const messagesForApi = messages.filter(msg => msg.role === 'user' || msg.role === 'assistant').map(msg => ({
+        role: msg.role,
+        content: msg.text
+      }));
+
       messagesForApi.push({ role: 'user', content: userMessageText });
 
       const payload = {

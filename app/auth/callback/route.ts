@@ -25,7 +25,14 @@ export async function GET(request: NextRequest) {
         },
       }
     );
-    await supabase.auth.exchangeCodeForSession(code);
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
+
+    if (error) {
+      // Redirect to login with an error message
+      const redirectUrl = new URL('/login', request.url);
+      redirectUrl.searchParams.set('error', error.message);
+      return NextResponse.redirect(redirectUrl);
+    }
   }
 
   // URL to redirect to after sign in process completes

@@ -28,25 +28,21 @@ export async function POST(request: NextRequest) {
       })
 
       if (!response.ok) {
-        throw new Error(`Python API responded with status: ${response.status}`)
+        const errorData = await response.json().catch(() => ({ detail: `Python API responded with status: ${response.status}` }));
+        return NextResponse.json({
+          error: errorData.detail || `Python API responded with status: ${response.status}`,
+          details: errorData.message || "No additional details."
+        }, { status: response.status });
       }
 
       const data = await response.json()
       return NextResponse.json(data)
     } catch (apiError) {
       console.error("Python API error:", apiError)
-      
-      // Return mock response when backend is unavailable
-      const lastMessage = messages[messages.length - 1]?.content || ""
-      
       return NextResponse.json({
-        response: `I understand you're asking about: "${lastMessage}". Currently, the AI service is temporarily unavailable, but I would normally provide detailed market intelligence insights based on your query. Please try again later when the service is restored.`,
-        context: {
-          query: lastMessage,
-          timestamp: new Date().toISOString(),
-          status: "fallback_mode"
-        }
-      })
+        error: "Backend service unavailable",
+        details: "The chat service is currently unavailable. Please try again later."
+      }, { status: 503 })
     }
   } catch (error) {
     console.error("Chat API error:", error)

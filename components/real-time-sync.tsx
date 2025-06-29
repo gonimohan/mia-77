@@ -1,12 +1,13 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { RefreshCw, Zap, CheckCircle, AlertCircle, Clock, Database } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { useToast } from "@/hooks/use-toast"
+import { getSyncStatus, startSync, ApiError } from "@/lib/api"
 
 // Aligned with backend's SyncStatusResponseItem
 interface SyncStatusInfo {
@@ -36,69 +37,29 @@ export function RealTimeSync() {
   const [isGlobalSyncActive, setIsGlobalSyncActive] = useState(false)
   const { toast } = useToast()
 
-  useEffect(() => {
-    // Initialize sync statuses from localDataSources
-    const initialStatuses = localDataSources.map((source) => ({
-      sourceId: source.id,
-      sourceName: source.name,
-      status: "pending" as SyncStatusInfo["status"],
-      progress: 0,
-      last_update: "Never",
-      message: "Awaiting sync.",
-    }));
-    setSyncStatuses(initialStatuses);
-
-    // Check for existing sync status from backend
-    fetchSyncStatus();
-  }, [])
-
-  // Polling logic
-  useEffect(() => {
-    let intervalId: NodeJS.Timeout | null = null;
-    const anySyncing = syncStatuses.some(s => s.status === 'syncing');
-
-    if (isGlobalSyncActive || anySyncing) { // Poll if global sync active OR any source is individually syncing
-      intervalId = setInterval(() => {
-        fetchSyncStatus();
-      }, 5000); // Poll every 5 seconds
+  const handleApiError = (error: any, context: string) => {
+    console.error(`${context} error:`, error)
+    let description = "An unexpected error occurred."
+    if (error instanceof ApiError) {
+      description = error.detail?.detail || error.message
+    } else if (error instanceof Error) {
+      description = error.message
     }
+    toast({
+      title: `${context} Failed`,
+      description,
+      variant: "destructive",
+    })
+  }
 
-    // Check if all syncing is done after a global sync was triggered
-    if (isGlobalSyncActive && !anySyncing && syncStatuses.length > 0) {
-       const allSourcesAttemptedOrCompleted = localDataSources.every(lds => {
-         const ss = syncStatuses.find(s => s.sourceId === lds.id);
-         // Consider a source "attempted" if it's not pending or syncing anymore
-         return ss && (ss.status === 'completed' || ss.status === 'synced' || ss.status === 'error');
-       });
-
-       if (allSourcesAttemptedOrCompleted) { // If all relevant sources are processed
-          setIsGlobalSyncActive(false);
-          toast({ title: "Sync Cycle Complete", description: "All requested source synchronizations have finished processing." });
-       }
-    }
-
-    return () => {
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [isGlobalSyncActive, syncStatuses, toast]); // Added toast to dependencies
-
-
-  const fetchSyncStatus = async () => {
+  const fetchSyncStatus = useCallback(async () => {
     try {
-      const response = await fetch("/api/agent/sync"); // GET request
-      if (!response.ok) {
-        console.error("Failed to fetch sync status:", response.statusText);
-        toast({ title: "Status Update Error", description: `Could not fetch latest statuses: ${response.statusText}`, variant: "destructive" });
-        return;
-      }
-      const data = await response.json(); // Expects AllSyncStatusesResponse
-
+      const data = await getSyncStatus()
       if (data && data.statuses) {
         const backendStatuses = data.statuses as Array<{source: string, status: string, progress: number, message?: string, last_update: string}>;
 
-        setSyncStatuses(prevStatuses => { // Use functional update to ensure we have latest prevStatuses
+        setSyncStatuses(prevStatuses => {
           return localDataSources.map(lds => {
-            // Backend 'source' is expected to match localDataSources 'id' field
             const backendStatus = backendStatuses.find(bs => bs.source === lds.id);
             const currentLocalStatus = prevStatuses.find(ps => ps.sourceId === lds.id);
 
@@ -112,8 +73,6 @@ export function RealTimeSync() {
                 last_update: backendStatus.last_update,
               };
             }
-            // If no backend status for this source, keep its existing local status
-            // or default to pending if somehow it's not in prevStatuses (should not happen with init)
             return currentLocalStatus || {
               sourceId: lds.id,
               sourceName: lds.name,
@@ -125,57 +84,76 @@ export function RealTimeSync() {
           });
         });
       }
-    } catch (error: any) {
-      console.error("Error in fetchSyncStatus:", error);
-      toast({ title: "Status Fetch Error", description: error.message || "Could not retrieve sync statuses.", variant: "destructive" });
+    } catch (error) {
+      handleApiError(error, "Fetch Sync Status")
     }
-  };
+  }, [toast])
+
+  useEffect(() => {
+    const initialStatuses = localDataSources.map((source) => ({
+      sourceId: source.id,
+      sourceName: source.name,
+      status: "pending" as SyncStatusInfo["status"],
+      progress: 0,
+      last_update: "Never",
+      message: "Awaiting sync.",
+    }));
+    setSyncStatuses(initialStatuses);
+    fetchSyncStatus();
+  }, [fetchSyncStatus])
+
+  useEffect(() => {
+    let intervalId: NodeJS.Timeout | null = null;
+    const anySyncing = syncStatuses.some(s => s.status === 'syncing');
+
+    if (isGlobalSyncActive || anySyncing) {
+      intervalId = setInterval(fetchSyncStatus, 5000);
+    }
+
+    if (isGlobalSyncActive && !anySyncing && syncStatuses.length > 0) {
+       const allSourcesAttemptedOrCompleted = localDataSources.every(lds => {
+         const ss = syncStatuses.find(s => s.sourceId === lds.id);
+         return ss && (ss.status === 'completed' || ss.status === 'synced' || ss.status === 'error');
+       });
+
+       if (allSourcesAttemptedOrCompleted) {
+          setIsGlobalSyncActive(false);
+          toast({ title: "Sync Cycle Complete", description: "All requested source synchronizations have finished processing." });
+       }
+    }
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [isGlobalSyncActive, syncStatuses, toast, fetchSyncStatus]);
 
   const startGlobalSync = async () => {
     setIsGlobalSyncActive(true);
-    // Optimistically set UI to "syncing" for sources being synced
     setSyncStatuses(prev =>
       prev.map(s =>
-        localDataSources.some(lds => lds.id === s.sourceId) // Only for sources we are about to sync
+        localDataSources.some(lds => lds.id === s.sourceId)
           ? {...s, status: 'syncing', progress: 5, message: 'Initiating...'}
           : s
       )
     );
 
     try {
-      const response = await fetch("/api/agent/sync", { // POST request
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sources: localDataSources.map((s) => s.id), // Send source IDs (which are names for backend)
-          market_domain: "general_technology", // Example, can be dynamic
-          sync_type: "full", // Example, can be dynamic
-        }),
-      });
-
-      const resultData = await response.json(); // Always try to parse JSON
-
-      if (!response.ok) {
-        throw new Error(resultData.detail || "Failed to start sync process.");
-      }
+      const resultData = await startSync({
+        sources: localDataSources.map((s) => s.id),
+        market_domain: "general_technology",
+        sync_type: "full",
+      })
 
       toast({
         title: "Global Sync Initiated",
         description: resultData.message || "Synchronization process has been started for all sources.",
       });
 
-      // Fetch status immediately to get the "syncing" state from backend
       await fetchSyncStatus();
-      // Polling useEffect will handle subsequent updates.
 
-    } catch (error: any) {
-      toast({
-        title: "Global Sync Error",
-        description: error.message || "Failed to initiate global data synchronization.",
-        variant: "destructive",
-      });
+    } catch (error) {
+      handleApiError(error, "Start Global Sync")
       setIsGlobalSyncActive(false);
-      // Revert status for items that were optimistically set to "syncing"
       setSyncStatuses(prev =>
         prev.map(s =>
           s.status === 'syncing' && localDataSources.some(lds => lds.id === s.sourceId)

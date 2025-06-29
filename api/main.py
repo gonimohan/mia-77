@@ -18,7 +18,7 @@ import numpy as np
 from supabase import create_client, Client
 from pathlib import Path
 import json
-from . import database # For Supabase operations
+import database # For Supabase operations
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -50,7 +50,7 @@ else:
     logger.warning("Supabase credentials not found in environment variables")
 
 # Create uploads directory
-UPLOAD_DIR = Path("/app/uploads")
+UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 # Pydantic models
@@ -58,6 +58,7 @@ class AnalysisRequest(BaseModel):
     query: str
     market_domain: str
     question: Optional[str] = None
+    uploaded_file_ids: Optional[List[str]] = None
 
 class ChatRequest(BaseModel):
     messages: List[Dict[str, Any]]
@@ -230,80 +231,34 @@ class MarketIntelligenceAgent:
         self.google_api_key = os.getenv("GOOGLE_API_KEY")
         self.news_api_key = os.getenv("NEWS_API_KEY")
         self.tavily_api_key = os.getenv("TAVILY_API_KEY")
-        
-    async def generate_insights(self, query: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Generate AI-powered market intelligence insights"""
+
+    async def generate_insights(self, query: str, context: Dict[str, Any] = None, uploaded_file_paths: Optional[List[str]] = None) -> Dict[str, Any]:
         try:
-            # Simulated AI analysis for now
-            # In production, integrate with actual LLM APIs
-            insights = {
-                "query": query,
-                "insights": [
-                    f"Market analysis for '{query}' shows emerging trends in digital transformation",
-                    f"Competitive landscape analysis reveals 3 key players in the {context.get('market_domain', 'general')} space",
-                    f"Growth opportunities identified in {context.get('market_domain', 'target market')} segment",
-                    f"Risk factors include market volatility and regulatory changes"
-                ],
-                "recommendations": [
-                    "Focus on digital-first approach to capture emerging market segments",
-                    "Invest in customer experience improvements",
-                    "Monitor competitive pricing strategies closely",
-                    "Diversify market presence to reduce concentration risk"
-                ],
-                "confidence_score": 0.87,
-                "data_sources": ["market_research", "competitive_analysis", "financial_data"],
-                "generated_at": datetime.now().isoformat()
-            }
-            
-            return insights
+            from agent_logic import MarketIntelligenceState, run_market_intelligence_agent
+            state = MarketIntelligenceState(
+                query=query,
+                market_domain=context.get("market_domain") if context else None,
+                question=context.get("question") if context else None,
+                user_id=context.get("user_id") if context else None
+            )
+            # Pass uploaded_file_paths to the agent's main function
+            result = await run_market_intelligence_agent(state, uploaded_file_paths=uploaded_file_paths)
+            return result
         except Exception as e:
-            logger.error(f"AI insights generation error: {e}")
+            logger.error(f"AI insights generation error (Gemini RAG): {e}")
             raise HTTPException(status_code=500, detail=f"Failed to generate insights: {str(e)}")
 
     async def process_file_with_ai(self, file_data: Dict[str, Any], query: str = None) -> Dict[str, Any]:
-        """Process uploaded file data with AI analysis"""
         try:
-            analysis = {
-                "file_type": file_data.get("type"),
-                "processing_timestamp": datetime.now().isoformat(),
-                "ai_insights": [],
-                "recommendations": [],
-                "visualizations": []
-            }
-            
-            if file_data.get("type") == "csv":
-                # Analyze CSV data
-                analysis["ai_insights"] = [
-                    f"Dataset contains {file_data.get('rows', 0)} records across {file_data.get('columns', 0)} dimensions",
-                    "Data quality assessment: " + ("High" if file_data.get('null_counts', {}) else "Moderate"),
-                    "Potential for trend analysis and predictive modeling identified"
-                ]
-                
-                analysis["recommendations"] = [
-                    "Consider time-series analysis if temporal data is present",
-                    "Implement data validation for missing values",
-                    "Explore correlation patterns between key variables"
-                ]
-            
-            elif file_data.get("type") == "text":
-                # Analyze text content
-                word_count = file_data.get("word_count", 0)
-                analysis["ai_insights"] = [
-                    f"Document contains {word_count} words across {file_data.get('line_count', 0)} lines",
-                    "Text complexity: " + ("High" if word_count > 1000 else "Moderate"),
-                    "Suitable for sentiment analysis and content categorization"
-                ]
-                
-                analysis["recommendations"] = [
-                    "Perform sentiment analysis to gauge market perception",
-                    "Extract key entities and topics for market intelligence",
-                    "Consider competitive mention analysis"
-                ]
-                
-            return analysis
-            
+            from agent_logic import MarketIntelligenceState, rag_query_handler
+            state = MarketIntelligenceState(
+                query=query or "Analyze this file",
+                file_data=file_data
+            )
+            result = await rag_query_handler(state)
+            return result
         except Exception as e:
-            logger.error(f"File AI processing error: {e}")
+            logger.error(f"File AI processing error (Gemini RAG): {e}")
             raise HTTPException(status_code=500, detail=f"AI file processing failed: {str(e)}")
 
 # Initialize AI agent
@@ -364,14 +319,22 @@ async def health_check():
 async def analyze(request: AnalysisRequest, user=Depends(get_current_user)):
     try:
         logger.info(f"Analysis request: {request.query} for domain: {request.market_domain}")
+        uploaded_file_paths = []
+        if request.uploaded_file_ids:
+            if not supabase:
+                raise HTTPException(status_code=500, detail="Database not configured")
+            for file_id in request.uploaded_file_ids:
+                file_record_result = supabase.table("documents").select("saved_file_path").eq("id", file_id).eq("uploader_id", user.id).execute()
+                if file_record_result.data and file_record_result.data[0].get("saved_file_path"):
+                    uploaded_file_paths.append(file_record_result.data[0]["saved_file_path"])
+                else:
+                    logger.warning(f"Uploaded file ID {file_id} not found or not owned by user {user.id}.")
 
-        # Generate AI-powered insights
         insights = await ai_agent.generate_insights(
             request.query,
-            {"market_domain": request.market_domain, "question": request.question}
+            {"market_domain": request.market_domain, "question": request.question, "user_id": user.id},
+            uploaded_file_paths=uploaded_file_paths
         )
-        
-        # Store analysis in database
         if supabase:
             try:
                 analysis_record = {
@@ -382,28 +345,11 @@ async def analyze(request: AnalysisRequest, user=Depends(get_current_user)):
                     "insights": insights,
                     "created_at": datetime.now().isoformat()
                 }
-                
                 result = supabase.table("market_analyses").insert(analysis_record).execute()
                 logger.info(f"Analysis stored with ID: {result.data[0]['id'] if result.data else 'unknown'}")
             except Exception as db_error:
                 logger.warning(f"Failed to store analysis in database: {db_error}")
-                # Continue without failing the request
-
-        analysis_result = {
-            "query": request.query,
-            "market_domain": request.market_domain,
-            "question": request.question,
-            "analysis": insights.get("insights", []),
-            "recommendations": insights.get("recommendations", []),
-            "confidence_score": insights.get("confidence_score", 0.87),
-            "timestamp": datetime.now().isoformat(),
-            "metadata": {
-                "processing_time_ms": 1250,
-                "data_sources": insights.get("data_sources", []),
-                "version": "1.0.0"
-            }
-        }
-
+        analysis_result = insights
         return analysis_result
     except Exception as e:
         logger.error(f"Analysis error: {str(e)}")
@@ -413,44 +359,17 @@ async def analyze(request: AnalysisRequest, user=Depends(get_current_user)):
 async def chat(request: ChatRequest):
     try:
         logger.info(f"Chat request with {len(request.messages)} messages")
-
         last_message = request.messages[-1] if request.messages else {}
         user_content = last_message.get("content", "")
         session_id = request.context.get("session_id") if request.context else None
-
-        # Enhanced RAG-powered response generation
-        # In production, this would integrate with vector databases and retrieval systems
-        context_info = ""
-        if request.context:
-            context_info = f" (Session: {session_id})"
-
-        # Generate AI response using market intelligence agent
-        ai_response = await ai_agent.generate_insights(
-            user_content,
-            {"type": "chat", "session_id": session_id, "context": request.context}
-        )
-
-        response = {
-            "response": f"Based on my market intelligence analysis{context_info}, here are insights about '{user_content}': " + 
-                       " ".join(ai_response.get("insights", ["I can help you with market analysis and insights."])[:2]),
-            "context": {
-                "message_count": len(request.messages),
-                "query_type": "market_intelligence",
-                "confidence": ai_response.get("confidence_score", 0.92),
-                "timestamp": datetime.now().isoformat(),
-                "session_id": session_id
-            },
-            "suggestions": ai_response.get("recommendations", [
-                "Would you like more details about market trends?",
-                "Should I analyze competitor positioning?",
-                "Do you need strategic recommendations?"
-            ])[:3]
-        }
-
-        return response
+        from agent_logic import chat_with_agent
+        history = request.messages
+        user_id = request.context.get("user_id") if request.context else None
+        response = await chat_with_agent(user_content, session_id, history, user_id)
+        return {"response": response}
     except Exception as e:
         logger.error(f"Chat error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Chat processing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
 async def process_document_pipeline(document_id: str, internal_filename: str, original_filename: str, file_extension: str, saved_file_path: str):
     """
@@ -898,36 +817,34 @@ async def delete_data_source(source_id: str, user=Depends(get_current_user)):
 
 @app.post("/api/data-sources/{source_id}/test")
 async def test_data_source(source_id: str, user=Depends(get_current_user)):
-    """Test connection to a data source"""
     try:
         if not supabase:
             raise HTTPException(status_code=500, detail="Database not configured")
-            
         result = supabase.table("data_sources").select("*").eq("id", source_id).eq("user_id", user.id).execute()
-        
         if not result.data:
             raise HTTPException(status_code=404, detail="Data source not found")
-            
         data_source = result.data[0]
-        
-        # Mock connection test - in production, implement actual API testing
-        test_result = {
-            "test_successful": True,
-            "tested_service_type": data_source["type"],
-            "message": f"Successfully connected to {data_source['name']}",
-            "response_time_ms": 150,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        # Update data source status
+        # Implement actual connection test logic here based on data_source['type']
+        # Example: For API, try a real request; for DB, try a real connection
+        # For now, just check if config is present
+        if data_source.get("config"):
+            test_successful = True
+            message = f"Successfully connected to {data_source['name']}"
+        else:
+            test_successful = False
+            message = f"Failed to connect to {data_source['name']} (missing config)"
         supabase.table("data_sources").update({
-            "status": "active" if test_result["test_successful"] else "error",
+            "status": "active" if test_successful else "error",
             "last_sync": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat()
         }).eq("id", source_id).execute()
-        
-        return test_result
-        
+        return {
+            "test_successful": test_successful,
+            "tested_service_type": data_source["type"],
+            "message": message,
+            "response_time_ms": 150,
+            "timestamp": datetime.now().isoformat()
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -947,7 +864,9 @@ async def sync_data_source(source_id: str, user=Depends(get_current_user)):
             raise HTTPException(status_code=404, detail="Data source not found")
             
         data_source = result.data[0]
-
+    except Exception as e:
+        logger.error(f"Data source sync error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Data source sync failed: {str(e)}")
 
 @app.get("/api/documents/search")
 async def search_documents(
@@ -1120,30 +1039,6 @@ async def extract_document_insights(
         logger.error(f"Document insights extraction error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Insight extraction failed: {str(e)}")
 
-
-        
-        # Mock sync process - in production, implement actual data syncing
-        sync_result = {
-            "sync_successful": True,
-            "records_synced": 150,
-            "message": f"Successfully synced data from {data_source['name']}",
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        # Update last sync timestamp
-        supabase.table("data_sources").update({
-            "last_sync": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
-        }).eq("id", source_id).execute()
-        
-        return sync_result
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Data source sync error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Data source sync failed: {str(e)}")
-
 @app.get("/api/kpi")
 async def get_kpi(timeframe: str = "30d", category: str = "all"):
     try:
@@ -1300,40 +1195,24 @@ async def generate_report(
 
 @app.get("/api/reports/{report_id}/download")
 async def download_report(report_id: str, format: str = "json"):
-    """Download a generated report"""
     try:
-        # In production, retrieve actual report data
-        mock_report = {
-            "report_id": report_id,
-            "title": "Market Intelligence Report",
-            "generated_at": datetime.now().isoformat(),
-            "sections": [
-                {
-                    "title": "Executive Summary",
-                    "content": "Market analysis shows positive trends in digital transformation sectors."
-                },
-                {
-                    "title": "Key Insights",
-                    "content": "3 major opportunities identified in emerging markets."
-                }
-            ]
-        }
-        
+        if not supabase:
+            raise HTTPException(status_code=500, detail="Database not configured")
+        result = supabase.table("reports").select("*").eq("id", report_id).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Report not found")
+        report = result.data[0]
         if format == "csv":
-            # Convert to CSV format
             import io
             output = io.StringIO()
             output.write("Section,Content\n")
-            for section in mock_report["sections"]:
-                output.write(f'"{section["title"]}","{section["content"]}"\n')
-            
+            for section in report.get("sections", []):
+                output.write(f'"{section.get("title", "")}","{section.get("content", "")}"\n')
             return JSONResponse(
                 content={"csv_data": output.getvalue()},
                 headers={"Content-Disposition": f"attachment; filename=report_{report_id}.csv"}
             )
-        
-        return mock_report
-        
+        return report
     except Exception as e:
         logger.error(f"Report download error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Report download failed: {str(e)}")

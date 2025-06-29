@@ -14,7 +14,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ColorPaletteSelector } from "@/components/color-palette-selector";
 import { useAuth } from "@/components/auth-provider";
 import { useToast } from "@/hooks/use-toast";
-// import { createClientComponentClient } from "@supabase/auth-helpers-nextjs"; // Removed
 
 export default function SettingsPage() {
   const { user, supabaseClient, loading: authLoading, isConfigured } = useAuth(); // Use supabaseClient from useAuth
@@ -96,9 +95,19 @@ export default function SettingsPage() {
   };
 
   const handleClearCache = () => {
+    // Clear chat history from localStorage
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('chat_messages_')) {
+        localStorage.removeItem(key);
+      }
+    }
+    // Clear current chat session ID
+    localStorage.removeItem('chatSessionId');
+
     toast({
-      title: "Cache Cleared (Simulated)",
-      description: "This is a placeholder. Full cache clearing functionality will be implemented later.",
+      title: "Cache Cleared",
+      description: "Chat history and session data have been cleared.",
     });
   };
 

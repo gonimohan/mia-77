@@ -120,6 +120,11 @@ export default function CompetitorsPage() {
     } catch (error) {
       console.error("Failed to fetch or transform competitor data:", error);
       setCompetitors([]);
+      toast({
+        title: "Competitor Data Error",
+        description: "Failed to load competitor data.",
+        variant: "destructive",
+      });
     } finally {
       setIsLoading(false);
     }

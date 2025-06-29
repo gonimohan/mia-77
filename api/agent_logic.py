@@ -13,6 +13,100 @@ from pydantic import BaseModel, Field, field_validator
 import traceback
 import argparse
 
+try:
+    import pdfplumber
+except ImportError:
+    pdfplumber = None
+    print("pdfplumber not installed. PDF text extraction will be disabled.")
+
+try:
+    from docx import Document
+except ImportError:
+    Document = None
+    print("python-docx not installed. DOCX text extraction will be disabled.")
+
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
+    print("openpyxl not installed. XLSX text extraction will be disabled.")
+
+
+def _extract_text_from_pdf(file_path: str) -> str:
+    if not pdfplumber:
+        logger.warning("pdfplumber not available. Cannot extract text from PDF.")
+        return ""
+    text = ""
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            for page in pdf.pages:
+                text += page.extract_text() or ""
+        return text
+    except Exception as e:
+        error_logger.error(f"Error extracting text from PDF {file_path}: {e}")
+        return ""
+
+def _extract_text_from_docx(file_path: str) -> str:
+    if not Document:
+        logger.warning("python-docx not available. Cannot extract text from DOCX.")
+        return ""
+    text = []
+    try:
+        document = Document(file_path)
+        for para in document.paragraphs:
+            text.append(para.text)
+        return "\n".join(text)
+    except Exception as e:
+        error_logger.error(f"Error extracting text from DOCX {file_path}: {e}")
+        return ""
+
+def _extract_text_from_xlsx(file_path: str) -> str:
+    if not openpyxl:
+        logger.warning("openpyxl not available. Cannot extract text from XLSX.")
+        return ""
+    text = []
+    try:
+        workbook = openpyxl.load_workbook(file_path)
+        for sheet_name in workbook.sheetnames:
+            sheet = workbook[sheet_name]
+            for row in sheet.iter_rows():
+                for cell in row:
+                    if cell.value is not None:
+                        text.append(str(cell.value))
+        return "\n".join(text)
+    except Exception as e:
+        error_logger.error(f"Error extracting text from XLSX {file_path}: {e}")
+        return ""
+
+def _extract_text_from_csv(file_path: str) -> str:
+    text = []
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                text.extend(row)
+        return "\n".join(text)
+    except Exception as e:
+        error_logger.error(f"Error extracting text from CSV {file_path}: {e}")
+        return ""
+
+def _extract_text_from_json(file_path: str) -> str:
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return json.dumps(data, indent=2)
+    except Exception as e:
+        error_logger.error(f"Error extracting text from JSON {file_path}: {e}")
+        return ""
+
+def _extract_text_from_txt(file_path: str) -> str:
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        error_logger.error(f"Error extracting text from TXT {file_path}: {e}")
+        return ""
+
 # Import required libraries with proper error handling
 try:
     from langchain.chat_models import init_chat_model
@@ -75,6 +169,14 @@ except ImportError:
     pd = None
     np = None
     print("matplotlib/seaborn/pandas/numpy not installed. Chart generation will be disabled.")
+
+try:
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import inch
+except ImportError:
+    SimpleDocTemplate = None
+    print("reportlab not installed. PDF generation will be disabled.")
 
 # Configure logging
 logging.basicConfig(
@@ -328,6 +430,7 @@ class MarketIntelligenceState(BaseModel):
     report_dir: Optional[str] = None
     chart_paths: List[str] = Field(default_factory=list)
     download_files: Dict[str, str] = Field(default_factory=dict)
+    uploaded_files_content: List[Dict[str, Any]] = Field(default_factory=list)
 
     @field_validator('market_domain')
     @classmethod
@@ -391,184 +494,7 @@ def save_state(state_obj: MarketIntelligenceState):
         if conn:
             conn.close()
 
-def list_user_analysis_states(user_id: str) -> List[Dict[str, Any]]:
-    db_path = get_db_path()
-    states_summary = []
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, market_domain, query, created_at, user_id FROM states WHERE user_id = ? ORDER BY DATETIME(created_at) DESC LIMIT 50",
-            (user_id,)
-        )
-        rows = cursor.fetchall()
 
-        column_names = [description[0] for description in cursor.description]
-
-        for row in rows:
-            row_dict = dict(zip(column_names, row))
-            states_summary.append({
-                "state_id": row_dict["id"],
-                "market_domain": row_dict["market_domain"],
-                "query": row_dict["query"],
-                "created_at": row_dict["created_at"],
-                "user_id": row_dict["user_id"]
-            })
-        logger.info(f"Fetched {len(states_summary)} analysis states for UserID {user_id}")
-    except sqlite3.Error as e:
-        error_logger.error(f"SQLite error fetching states for UserID {user_id}: {e}")
-    except Exception as e:
-        error_logger.error(f"Unexpected error fetching states for UserID {user_id}: {e}\n{traceback.format_exc()}")
-    finally:
-        if conn:
-            conn.close()
-    return states_summary
-
-def get_state_download_info(state_id: str, user_id: str) -> Optional[Dict[str, Any]]:
-    db_path = get_db_path()
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT query, market_domain, created_at, state_data, user_id FROM states WHERE id = ? AND user_id = ?",
-            (state_id, user_id)
-        )
-        row = cursor.fetchone()
-
-        if not row:
-            logger.warning(f"Download Info: State ID {state_id} not found or not owned by user {user_id}")
-            return None
-
-        query, market_domain, created_at, state_data_json, db_user_id = row
-
-        if db_user_id != user_id:
-            logger.error(f"Download Info: Mismatch user_id for state {state_id}. Expected {user_id}, found {db_user_id}.")
-            return None
-
-        try:
-            state_data_dict = json.loads(state_data_json)
-        except json.JSONDecodeError:
-            error_logger.error(f"Download Info: Failed to parse state_data for state {state_id}")
-            return None
-
-        downloadable_files_list = []
-
-        agent_download_files = state_data_dict.get("download_files", {})
-        if isinstance(agent_download_files, dict):
-            for category, full_path in agent_download_files.items():
-                if full_path and isinstance(full_path, str):
-                     downloadable_files_list.append({
-                        "category": category,
-                        "filename": os.path.basename(full_path),
-                        "description": f"{category.replace('_', ' ').title()} file"
-                    })
-                else:
-                    logger.warning(f"Download Info: Invalid path for category '{category}' in state {state_id}: {full_path}")
-
-        agent_chart_paths = state_data_dict.get("chart_paths", [])
-        if isinstance(agent_chart_paths, list):
-            for full_path in agent_chart_paths:
-                if full_path and isinstance(full_path, str):
-                    base = os.path.basename(full_path)
-                    chart_name, _ = os.path.splitext(base)
-                    category_name = f"chart_{chart_name.lower().replace(' ', '_').replace('-', '_')}"
-                    downloadable_files_list.append({
-                        "category": category_name,
-                        "filename": base,
-                        "description": f"Chart: {chart_name.replace('_', ' ').replace('-', ' ').title()}"
-                    })
-                else:
-                     logger.warning(f"Download Info: Invalid chart path in state {state_id}: {full_path}")
-
-        return {
-            "state_id": state_id,
-            "query": query,
-            "market_domain": market_domain,
-            "created_at": created_at,
-            "files": downloadable_files_list
-        }
-
-    except sqlite3.Error as e:
-        error_logger.error(f"Download Info: SQLite error for state {state_id}, user {user_id}: {e}")
-        return None
-    except Exception as e:
-        error_logger.error(f"Download Info: Unexpected error for state {state_id}, user {user_id}: {e}\n{traceback.format_exc()}")
-        return None
-    finally:
-        if conn:
-            conn.close()
-
-def get_download_file_path(state_id: str, user_id: str, file_identifier: str) -> Optional[str]:
-    db_path = get_db_path()
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT state_data FROM states WHERE id = ? AND user_id = ?", # Only need state_data
-            (state_id, user_id)
-        )
-        row = cursor.fetchone()
-        if not row:
-            logger.warning(f"File Download: State ID {state_id} not found or not owned by user {user_id}")
-            return None
-
-        state_data_json = row[0]
-        try:
-            state_data_dict = json.loads(state_data_json)
-        except json.JSONDecodeError:
-            error_logger.error(f"File Download: Failed to parse state_data for state {state_id}")
-            return None
-
-        target_path = None
-
-        # Check in download_files (category lookup)
-        agent_download_files = state_data_dict.get("download_files", {})
-        if isinstance(agent_download_files, dict) and file_identifier in agent_download_files:
-            target_path = agent_download_files[file_identifier]
-
-        # If not found by category, check chart_paths (filename lookup)
-        if not target_path:
-            agent_chart_paths = state_data_dict.get("chart_paths", [])
-            if isinstance(agent_chart_paths, list):
-                for chart_path in agent_chart_paths:
-                    if chart_path and isinstance(chart_path, str) and os.path.basename(chart_path) == file_identifier:
-                        target_path = chart_path
-                        break
-
-        if not target_path or not isinstance(target_path, str):
-            logger.warning(f"File Download: File identifier '{file_identifier}' not found in state {state_id} for user {user_id}.")
-            return None
-
-        # Security Check: Ensure the path is within the expected reports directory
-        reports_base_dir = os.path.abspath(get_agent_base_reports_dir())
-        if not isinstance(target_path, str): # Should be redundant given previous check, but good for safety
-             error_logger.error(f"File Download: target_path is not a string for state {state_id}, identifier {file_identifier}.")
-             return None
-        resolved_target_path = os.path.abspath(target_path)
-
-        if not resolved_target_path.startswith(reports_base_dir):
-            error_logger.error(f"File Download SECURITY ALERT: Attempt to access path '{resolved_target_path}' outside base reports directory '{reports_base_dir}' for state {state_id}, user {user_id}.")
-            return None
-
-        if not os.path.exists(resolved_target_path) or not os.path.isfile(resolved_target_path):
-            error_logger.error(f"File Download: File does not exist or is not a file at path '{resolved_target_path}' for state {state_id}, user {user_id}.")
-            return None
-
-        logger.info(f"File Download: Access validated for path '{resolved_target_path}' for state {state_id}, user {user_id}.")
-        return resolved_target_path
-
-    except sqlite3.Error as e:
-        error_logger.error(f"File Download: SQLite error for state {state_id}, user {user_id}: {e}")
-        return None
-    except Exception as e:
-        error_logger.error(f"File Download: Unexpected error for state {state_id}, user {user_id}: {e}\n{traceback.format_exc()}")
-        return None
-    finally:
-        if conn:
-            conn.close()
 
 def list_user_analysis_states(user_id: str) -> List[Dict[str, Any]]:
     db_path = get_db_path()
@@ -663,6 +589,13 @@ def get_state_download_info(state_id: str, user_id: str) -> Optional[Dict[str, A
                     })
                 else:
                      logger.warning(f"Download Info: Invalid chart path in state {state_id}: {full_path}")
+
+        if "final_report_pdf" in state_data_dict.get("download_files", {}):
+            downloadable_files_list.append({
+                "category": "final_report_pdf",
+                "filename": "market_intelligence_report.pdf",
+                "description": "Final Report (PDF)"
+            })
 
         return {
             "state_id": state_id,
@@ -865,6 +798,81 @@ def search_with_serpapi(search_query: str, user_id: Optional[str] = None) -> Lis
         logger.warning(f"SerpAPI Search: SERPAPI_API_KEY not found for UserID: {user_id or 'N/A (global_fallback attempted)'}. Skipping SerpAPI search.")
         return [] # Original behavior was to return empty list, not raise error.
 
+def _extract_text_from_pdf(file_path: str) -> str:
+    if not pdfplumber:
+        logger.warning("pdfplumber not available. Cannot extract text from PDF.")
+        return ""
+    text = ""
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            for page in pdf.pages:
+                text += page.extract_text() or ""
+        return text
+    except Exception as e:
+        error_logger.error(f"Error extracting text from PDF {file_path}: {e}")
+        return ""
+
+def _extract_text_from_docx(file_path: str) -> str:
+    if not Document:
+        logger.warning("python-docx not available. Cannot extract text from DOCX.")
+        return ""
+    text = []
+    try:
+        document = Document(file_path)
+        for para in document.paragraphs:
+            text.append(para.text)
+        return "\n".join(text)
+    except Exception as e:
+        error_logger.error(f"Error extracting text from DOCX {file_path}: {e}")
+        return ""
+
+def _extract_text_from_xlsx(file_path: str) -> str:
+    if not openpyxl:
+        logger.warning("openpyxl not available. Cannot extract text from XLSX.")
+        return ""
+    text = []
+    try:
+        workbook = openpyxl.load_workbook(file_path)
+        for sheet_name in workbook.sheetnames:
+            sheet = workbook[sheet_name]
+            for row in sheet.iter_rows():
+                for cell in row:
+                    if cell.value is not None:
+                        text.append(str(cell.value))
+        return "\n".join(text)
+    except Exception as e:
+        error_logger.error(f"Error extracting text from XLSX {file_path}: {e}")
+        return ""
+
+def _extract_text_from_csv(file_path: str) -> str:
+    text = []
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                text.extend(row)
+        return "\n".join(text)
+    except Exception as e:
+        error_logger.error(f"Error extracting text from CSV {file_path}: {e}")
+        return ""
+
+def _extract_text_from_json(file_path: str) -> str:
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return json.dumps(data, indent=2)
+    except Exception as e:
+        error_logger.error(f"Error extracting text from JSON {file_path}: {e}")
+        return ""
+
+def _extract_text_from_txt(file_path: str) -> str:
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        error_logger.error(f"Error extracting text from TXT {file_path}: {e}")
+        return ""
+
     params = {
         "q": search_query,
         "api_key": api_key,
@@ -992,7 +1000,7 @@ def fetch_from_mediastack_direct(query: str, user_id: Optional[str] = None) -> L
         return []
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-def fetch_financial_data_fmp(query: str) -> List[Dict[str, Any]]:
+def fetch_financial_data_fmp(query: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
     if fmpsdk is None:
         logger.warning("FMP SDK called but library not available.")
         return []
@@ -1002,7 +1010,7 @@ def fetch_financial_data_fmp(query: str) -> List[Dict[str, Any]]:
         logger.info(f"FMP: Cache hit for query: '{query}'")
         return search_results_cache[cache_key]
 
-    api_key = get_api_key("FINANCIAL_MODELING_PREP")
+    api_key = get_api_key("FINANCIAL_MODELING_PREP", user_id=user_id)
     if not api_key:
         logger.warning("FMP_API_KEY not found or not set. Skipping FMP data fetch.")
         return []
@@ -1040,7 +1048,7 @@ def fetch_financial_data_fmp(query: str) -> List[Dict[str, Any]]:
         return []
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-def fetch_financial_data_alphavantage(query: str) -> List[Dict[str, Any]]:
+def fetch_financial_data_alphavantage(query: str, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
     if TimeSeries is None or FundamentalData is None:
         logger.warning("Alpha Vantage library called but not fully available.")
         return []
@@ -1050,7 +1058,7 @@ def fetch_financial_data_alphavantage(query: str) -> List[Dict[str, Any]]:
         logger.info(f"AlphaVantage: Cache hit for query: '{query}'")
         return search_results_cache[cache_key]
 
-    api_key = get_api_key("ALPHA_VANTAGE")
+    api_key = get_api_key("ALPHA_VANTAGE", user_id=user_id)
     if not api_key:
         logger.warning("ALPHA_VANTAGE_API_KEY not found or not set. Skipping Alpha Vantage data fetch.")
         return []
@@ -1111,7 +1119,7 @@ async def fetch_url_content(url_to_fetch: str) -> Dict[str, Any]:
             document_title = doc_object.metadata.get("title", "") or os.path.basename(url_to_fetch)
             if not document_title:
                 document_title = "Untitled Document"
-            logger.info(f"WebBaseLoader: Loaded from {url_to_fetch}. Title: '{document_title}'. Summary (first 50): '{summary_text[:50]}...'")
+            logger.info(f"WebBaseLoader: Loaded from {url_to_fetch}. Title: '{document_title}'. Summary (first 50): '{summary_text[:50]}...' ")
             return {"source": url_to_fetch, "title": document_title, "summary": summary_text, "full_content": cleaned_page_content, "url": url_to_fetch}
         else:
             logger.warning(f"WebBaseLoader: No document object returned from {url_to_fetch}")
@@ -1131,7 +1139,7 @@ def get_agent_base_reports_dir():
     os.makedirs(base_reports_dir, exist_ok=True)
     return base_reports_dir
 
-async def market_data_collector(current_state: MarketIntelligenceState) -> Dict[str, Any]:
+async def market_data_collector(current_state: MarketIntelligenceState, uploaded_file_paths: Optional[List[str]] = None) -> Dict[str, Any]:
     logger.info(f"Market Data Collector: Domain='{current_state.market_domain}', Query='{current_state.query or 'N/A'}'")
     ts_string = datetime.now().strftime("%Y%m%d_%H%M%S")
     query_prefix = re.sub(r'[^a-zA-Z0-9_-]', '_', (current_state.query or "general").lower().replace(' ', '_')[:20])
@@ -1155,16 +1163,47 @@ async def market_data_collector(current_state: MarketIntelligenceState) -> Dict[
     serpapi_news_urls_list = []
     serpapi_competitor_urls_list = []
 
+    # Process uploaded files
+    if uploaded_file_paths:
+        logger.info(f"Processing {len(uploaded_file_paths)} uploaded files.")
+        for f_path in uploaded_file_paths:
+            file_extension = os.path.splitext(f_path)[1].lower()
+            extracted_content = ""
+            if file_extension == ".pdf":
+                extracted_content = _extract_text_from_pdf(f_path)
+            elif file_extension == ".docx":
+                extracted_content = _extract_text_from_docx(f_path)
+            elif file_extension == ".xlsx":
+                extracted_content = _extract_text_from_xlsx(f_path)
+            elif file_extension == ".csv":
+                extracted_content = _extract_text_from_csv(f_path)
+            elif file_extension == ".json":
+                extracted_content = _extract_text_from_json(f_path)
+            elif file_extension == ".txt":
+                extracted_content = _extract_text_from_txt(f_path)
+            else:
+                logger.warning(f"Unsupported file type for extraction: {file_extension}")
+
+            if extracted_content:
+                current_state.uploaded_files_content.append({
+                    "source": f"uploaded_file:{os.path.basename(f_path)}",
+                    "title": os.path.basename(f_path),
+                    "summary": extracted_content[:1000],
+                    "full_content": extracted_content,
+                    "file_path": f_path
+                })
+                logger.info(f"Extracted content from {os.path.basename(f_path)}.")
+
     try:
         logger.info("Attempting Tavily search for news URLs...")
-        news_urls_list = search_with_tavily(news_search_query)
+        news_urls_list = search_with_tavily(news_search_query, user_id=current_state.user_id)
         logger.info(f"Tavily news search returned {len(news_urls_list)} URLs.")
     except Exception as e_tavily_news:
         error_logger.error(f"Tavily news search failed: {e_tavily_news}")
 
     try:
         logger.info("Attempting Tavily search for competitor URLs...")
-        competitor_urls_list = search_with_tavily(competitor_search_query)
+        competitor_urls_list = search_with_tavily(competitor_search_query, user_id=current_state.user_id)
         logger.info(f"Tavily competitor search returned {len(competitor_urls_list)} URLs.")
     except Exception as e_tavily_comp:
         error_logger.error(f"Tavily competitor search failed: {e_tavily_comp}")
@@ -1172,13 +1211,13 @@ async def market_data_collector(current_state: MarketIntelligenceState) -> Dict[
     if SerpApiClient is not None:
         try:
             logger.info("Attempting SerpAPI search for news URLs...")
-            serpapi_news_urls_list = search_with_serpapi(news_search_query)
+            serpapi_news_urls_list = search_with_serpapi(news_search_query, user_id=current_state.user_id)
             logger.info(f"SerpAPI news search returned {len(serpapi_news_urls_list)} URLs.")
         except Exception as e_serp_news:
             error_logger.error(f"SerpAPI news search failed: {e_serp_news}")
         try:
             logger.info("Attempting SerpAPI search for competitor URLs...")
-            serpapi_competitor_urls_list = search_with_serpapi(competitor_search_query)
+            serpapi_competitor_urls_list = search_with_serpapi(competitor_search_query, user_id=current_state.user_id)
             logger.info(f"SerpAPI competitor search returned {len(serpapi_competitor_urls_list)} URLs.")
         except Exception as e_serp_comp:
             error_logger.error(f"SerpAPI competitor search failed: {e_serp_comp}")
@@ -1194,7 +1233,7 @@ async def market_data_collector(current_state: MarketIntelligenceState) -> Dict[
     if NewsApiClient is not None:
         try:
             logger.info(f"Fetching from NewsAPI for query: '{current_query_or_domain}'")
-            newsapi_articles = fetch_from_newsapi_direct(current_query_or_domain)
+            newsapi_articles = fetch_from_newsapi_direct(current_query_or_domain, user_id=current_state.user_id)
             all_fetched_data.extend(newsapi_articles)
             logger.info(f"Retrieved {len(newsapi_articles)} articles from NewsAPI.")
         except Exception as e_newsapi:
@@ -1202,7 +1241,7 @@ async def market_data_collector(current_state: MarketIntelligenceState) -> Dict[
 
     try:
         logger.info(f"Fetching from MediaStack for query: '{current_query_or_domain}'")
-        mediastack_articles = fetch_from_mediastack_direct(current_query_or_domain)
+        mediastack_articles = fetch_from_mediastack_direct(current_query_or_domain, user_id=current_state.user_id)
         all_fetched_data.extend(mediastack_articles)
         logger.info(f"Retrieved {len(mediastack_articles)} articles from MediaStack.")
     except Exception as e_mstack:
@@ -1212,7 +1251,7 @@ async def market_data_collector(current_state: MarketIntelligenceState) -> Dict[
     if fmpsdk is not None:
         try:
             logger.info(f"Fetching financial data from FMP for query: '{current_query_or_domain}'")
-            fmp_fin_data = fetch_financial_data_fmp(current_query_or_domain)
+            fmp_fin_data = fetch_financial_data_fmp(current_query_or_domain, user_id=current_state.user_id)
             current_state.financial_data.extend(fmp_fin_data)
             logger.info(f"Retrieved {len(fmp_fin_data)} data items from FMP.")
         except Exception as e_fmp_fin:
@@ -1221,7 +1260,7 @@ async def market_data_collector(current_state: MarketIntelligenceState) -> Dict[
     if TimeSeries is not None and FundamentalData is not None:
         try:
             logger.info(f"Fetching financial data from Alpha Vantage for query: '{current_query_or_domain}'")
-            av_fin_data = fetch_financial_data_alphavantage(current_query_or_domain)
+            av_fin_data = fetch_financial_data_alphavantage(current_query_or_domain, user_id=current_state.user_id)
             current_state.financial_data.extend(av_fin_data)
             logger.info(f"Retrieved {len(av_fin_data)} data items from Alpha Vantage.")
         except Exception as e_av_fin:
@@ -1237,8 +1276,9 @@ async def market_data_collector(current_state: MarketIntelligenceState) -> Dict[
         content_data = await fetch_url_content(loop_url) # Await async call
         all_fetched_data.append(content_data)
 
-    current_state.raw_news_data = all_fetched_data
-    current_state.competitor_data = all_fetched_data
+    # Combine API fetched data with uploaded file content
+    current_state.raw_news_data = all_fetched_data + current_state.uploaded_files_content
+    current_state.competitor_data = all_fetched_data + current_state.uploaded_files_content
 
     try:
         with open(json_file_path, "w", encoding="utf-8") as f:
@@ -1407,7 +1447,7 @@ async def opportunity_identifier(current_state: MarketIntelligenceState) -> Dict
         # Make sure default_ops has all keys the prompt expects if parsed_ops is not a list of dicts later
         llm_output = await chain.ainvoke({
             "market_domain": current_state.market_domain,
-            "trends_json": json.dumps(current_state.market_trends[:5] if current_state.market_trends else []), # Ensure market_trends exists
+            "trends_json": json.dumps(current_state.market_trends[:5] if current_state.market_trends else []),
             "data_json": json.dumps({"news_sample": limited_news})
         })
         
@@ -1475,8 +1515,8 @@ async def strategy_recommender(current_state: MarketIntelligenceState) -> Dict[s
         limited_comp = current_state.competitor_data[:5] if current_state.competitor_data else []
         llm_output = await chain.ainvoke({
             "market_domain": current_state.market_domain,
-            "ops_json": json.dumps(current_state.opportunities[:5] if current_state.opportunities else []), # Ensure opportunities exist
-            "trends_json": json.dumps(current_state.market_trends[:5] if current_state.market_trends else []), # Ensure market_trends exist
+            "ops_json": json.dumps(current_state.opportunities[:5] if current_state.opportunities else []),
+            "trends_json": json.dumps(current_state.market_trends[:5] if current_state.market_trends else []),
             "comp_json": json.dumps({"competitors_sample": limited_comp})
         })
 
@@ -1958,16 +1998,15 @@ async def final_report_generator(current_state: MarketIntelligenceState) -> Dict
     if not current_state.report_dir:
         logger.warning("Final Report Generator: No report directory set. Cannot save report.")
         return current_state.model_dump()
-
     try:
         report_content = current_state.report_template or f"# Market Intelligence Report: {current_state.market_domain}\n\nNo template available."
-        
+
         # Replace placeholders with actual data
         current_date = datetime.now().strftime("%B %d, %Y")
         report_content = report_content.replace("{{DATE}}", current_date)
         report_content = report_content.replace("{{MARKET_DOMAIN}}", current_state.market_domain)
         report_content = report_content.replace("{{QUERY}}", current_state.query or "General Analysis")
-        
+
         # Add trends section
         if current_state.market_trends:
             trends_section = "\n## Key Market Trends\n\n"
@@ -2093,12 +2132,51 @@ For detailed analysis, see the complete report in `market_intelligence_report.md
         current_state.download_files["readme"] = readme_path
         logger.info(f"Final Report Generator: Saved README to {readme_path}")
 
+        generate_pdf_report(current_state)
+
     except Exception as e_report:
         error_logger.error(f"Final Report Generator: Failed to generate report: {e_report}\n{traceback.format_exc()}")
 
     save_state(current_state)
     logger.info("Final Report Generator: Node completed.")
     return current_state.model_dump()
+
+def generate_pdf_report(current_state: MarketIntelligenceState):
+    logger.info(f"PDF Generator: StateID='{current_state.state_id}'")
+    if not current_state.report_dir or not SimpleDocTemplate:
+        logger.warning("PDF Generator: Report directory not set or reportlab not installed. Cannot generate PDF.")
+        return
+
+    try:
+        report_path = os.path.join(current_state.report_dir, "market_intelligence_report.pdf")
+        doc = SimpleDocTemplate(report_path)
+        styles = getSampleStyleSheet()
+        story = []
+
+        # Title
+        story.append(Paragraph(f"Market Intelligence Report: {current_state.market_domain}", styles['h1']))
+        story.append(Spacer(1, 0.2*inch))
+
+        # Executive Summary
+        story.append(Paragraph("Executive Summary", styles['h2']))
+        # This is a placeholder. A proper summary would need to be generated.
+        summary_text = f"This report provides a market analysis for {current_state.market_domain} based on the query: '{current_state.query}'."
+        story.append(Paragraph(summary_text, styles['Normal']))
+        story.append(Spacer(1, 0.2*inch))
+
+        # Charts
+        if current_state.chart_paths:
+            story.append(Paragraph("Visualizations", styles['h2']))
+            for chart_path in current_state.chart_paths:
+                story.append(Image(chart_path, width=6*inch, height=4*inch))
+                story.append(Spacer(1, 0.2*inch))
+
+        doc.build(story)
+        current_state.download_files["final_report_pdf"] = report_path
+        logger.info(f"PDF Generator: Saved PDF report to {report_path}")
+
+    except Exception as e_pdf:
+        error_logger.error(f"PDF Generator: Failed to generate PDF report: {e_pdf}\n{traceback.format_exc()}")
 
 # MarketIntelligenceAgent class for compatibility with main.py
 class MarketIntelligenceAgent:
@@ -2218,140 +2296,98 @@ async def run_market_intelligence_agent(query_str: str, market_domain_str: str, 
             "data_json_filename": f"{final_state.market_domain.lower().replace(' ', '_')}_data_sources.json",
             "data_csv_filename": f"{final_state.market_domain.lower().replace(' ', '_')}_data_sources.csv",
             "readme_filename": "README.md",
+            "pdf_filename": "market_intelligence_report.pdf",
             "log_filename": "market_intelligence.log",
-            "rag_log_filename": "market_intelligence_errors.log",
-            "vector_store_dirname": os.path.basename(final_state.vector_store_path) if final_state.vector_store_path else None,
-            "query_response": final_state.query_response,
-            "download_files": final_state.download_files
+            "query_response": final_state.query_response
         }
-
-        logger.info(f"Agent Run: Successfully completed for StateID '{final_state.state_id}'")
+        logger.info(f"Agent Run: Successfully completed for State ID: {final_state.state_id}")
         return return_data
 
-    except Exception as e_agent_run:
-        error_logger.critical(f"Agent Run: CRITICAL FAILURE: {e_agent_run}\n{traceback.format_exc()}")
-        tb_str = traceback.format_exc()
+    except Exception as e:
+        error_logger.critical(f"Agent Run: CRITICAL ERROR during execution for initial query '{query_str}': {e}\n{traceback.format_exc()}")
+        
         try:
-            error_report_dir_path = os.path.join(get_agent_base_reports_dir(), f"ERROR_REPORT_{error_state_id[:8]}")
+            # Create a minimal error report
+            error_report_dir_path = os.path.join(get_agent_base_reports_dir(), f"ERROR_{error_state_id}")
             os.makedirs(error_report_dir_path, exist_ok=True)
-            error_report_file_path = os.path.join(error_report_dir_path, f"ERROR_REPORT_{error_state_id[:8]}.md")
-            with open(error_report_file_path, "w", encoding="utf-8") as f:
-                f.write(f"""# Market Intelligence Agent - Error Report
-
-**Error ID:** {error_state_id}
-**Timestamp:** {datetime.now().isoformat()}
-**Query:** {query_str}
-**Market Domain:** {market_domain_str}
-**Question:** {question_str or 'N/A'}
-
-## Error Details
-
-""")
-                f.write(f"\`\`\`\n{tb_str}\n\`\`\`")
-        except Exception as e_error_report:
-            error_logger.error(f"Agent Run: Failed to write error report: {e_error_report}")
+            error_report_file_path = os.path.join(error_report_dir_path, "error_report.json")
+            
+            error_details = {
+                "error_state_id": error_state_id,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "initial_query": query_str,
+                "market_domain": market_domain_str,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
+            
+            with open(error_report_file_path, "w") as f_err:
+                json.dump(error_details, f_err, indent=4)
+                
+        except Exception as e_report:
+            error_logger.error(f"Agent Run: FAILED to write detailed error report to {error_report_file_path}: {e_report}")
 
         return {
             "success": False,
             "state_id": error_state_id,
+            "error": f"An unexpected error occurred: {e}",
             "report_dir_relative": os.path.relpath(error_report_dir_path, get_agent_base_reports_dir()) if error_report_dir_path else None,
-            "report_filename": os.path.basename(error_report_file_path) if error_report_file_path else None,
-            "chart_filenames": [],
-            "data_json_filename": None,
-            "data_csv_filename": None,
-            "readme_filename": None,
-            "log_filename": None,
-            "rag_log_filename": None,
-            "vector_store_dirname": None,
-            "query_response": None,
-            "download_files": None,
-            "error": str(e_agent_run)
+            "report_filename": "error_report.json" if error_report_file_path else None
         }
 
 async def chat_with_agent(message: str, session_id: str, history: List[Dict[str, Any]], user_id: Optional[str] = None) -> str:
-    # Ensure necessary imports are available
-    # from langchain_google_genai import ChatGoogleGenerativeAI
-    # import os
-    # logger, error_logger, get_api_key, ChatPromptTemplate, MessagesPlaceholder, StrOutputParser, HumanMessage, AIMessage, save_chat_message, load_chat_history, traceback
-
-    logger.info(f"Agent Chat: Received message for session_id {session_id}, UserID: {user_id or 'N/A'}: '{message[:100]}...'") # Log UserID
-    save_chat_message(session_id, "user", message)
-
-    langchain_history = []
-    for msg_data in history: # history is already loaded by MarketIntelligenceAgent.chat if it was None
-        if msg_data["type"] == "user":
-            langchain_history.append(HumanMessage(content=msg_data["content"]))
-        elif msg_data["type"] == "ai":
-            langchain_history.append(AIMessage(content=msg_data["content"]))
+    logger.info(f"Chat: Received message for session {session_id}, UserID: {user_id or 'N/A'}")
+    save_chat_message(session_id, "human", message)
 
     try:
         user_google_api_key = get_api_key("GOOGLE_GEMINI", user_id=user_id)
-        llm_temperature = 0.7 # Original temperature for chat
-
         if user_google_api_key:
-            logger.info(f"Chat: Using user-provided Google Gemini API key for session {session_id}, UserID {user_id}")
-            chat_llm = ChatGoogleGenerativeAI(model="gemini-pro", google_api_key=user_google_api_key, temperature=llm_temperature)
+            logger.info(f"Chat: Using user-provided Google Gemini API key for session {session_id}")
+            llm = ChatGoogleGenerativeAI(model="gemini-pro", google_api_key=user_google_api_key, temperature=0.5)
         else:
-            logger.info(f"Chat: Using default Google Gemini API key (from env) for session {session_id}, UserID {user_id or 'N/A (fallback)'}")
+            logger.info(f"Chat: Using default Google Gemini API key (from env) for session {session_id}")
             if not os.getenv("GOOGLE_API_KEY"):
-                error_logger.warning(f"Chat: GOOGLE_API_KEY not found in environment for default LLM init for session {session_id}.")
-            chat_llm = ChatGoogleGenerativeAI(model="gemini-pro", temperature=llm_temperature)
-            # Stricter fallback if needed:
-            # chat_llm = init_chat_model(model_name="gemini-pro", model_provider="google_genai", temperature=llm_temperature)
+                 error_logger.warning(f"Chat: GOOGLE_API_KEY not found in env for session {session_id}. Chat may fail.")
+            llm = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.5)
 
-        prompt_template = ChatPromptTemplate.from_messages([
-            ("system", "You are a helpful assistant. Respond to the user's query based on the provided chat history."),
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a helpful assistant. Use the chat history to provide context-aware responses."),
             MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{input}")
+            ("human", "{input}"),
         ])
-        chain = prompt_template | chat_llm | StrOutputParser()
+        chain = prompt | llm | StrOutputParser()
 
-        response_text = await chain.ainvoke({"input": message, "chat_history": langchain_history})
+        chat_history_langchain = []
+        for msg in history:
+            if msg.get("type") == "human":
+                chat_history_langchain.append(HumanMessage(content=msg.get("content", "")))
+            elif msg.get("type") == "ai":
+                chat_history_langchain.append(AIMessage(content=msg.get("content", "")))
 
-        save_chat_message(session_id, "ai", response_text)
-        logger.info(f"Agent Chat: Response generated for session_id {session_id}, UserID {user_id or 'N/A'}.")
-        return response_text
-
-    except ValueError as ve:
-        error_logger.error(f"Agent Chat: Value error for session {session_id}, UserID {user_id or 'N/A'} (possibly API key issue): {ve}\n{traceback.format_exc()}")
-        error_response = "Sorry, I encountered a configuration error while processing your message."
-        save_chat_message(session_id, "ai", error_response)
-        return error_response
+        response = await chain.ainvoke({"input": message, "chat_history": chat_history_langchain})
+        
+        save_chat_message(session_id, "ai", response)
+        logger.info(f"Chat: Generated response for session {session_id}")
+        return response
     except Exception as e:
-        error_logger.error(f"Agent Chat: Error processing message for session {session_id}, UserID {user_id or 'N/A'}: {e}\n{traceback.format_exc()}")
-        error_response = "Sorry, I encountered an unexpected error while processing your message."
-        save_chat_message(session_id, "ai", error_response)
-        return error_response
+        error_logger.error(f"Chat: Error during chat for session {session_id}: {e}\n{traceback.format_exc()}")
+        return f"Sorry, an error occurred: {e}"
 
-if __name__ == "__main__":
-    cmd_arg_parser = argparse.ArgumentParser(description="Market Intelligence Agent CLI")
-    cmd_arg_parser.add_argument("--query", type=str, default="AI impact on EdTech", help="The main query or topic for market analysis.")
-    cmd_arg_parser.add_argument("--market", type=str, default="EdTech", help="The target market domain for analysis.")
-    cmd_arg_parser.add_argument("--question", type=str, default=None, help="Optional: A specific question for the RAG system about the generated data/report.")
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Run Market Intelligence Agent")
+    parser.add_argument("--query", type=str, required=True, help="The user's query for the agent.")
+    parser.add_argument("--domain", type=str, required=True, help="The market domain to analyze.")
+    parser.add_argument("--question", type=str, help="A specific question for the RAG system.")
+    parser.add_argument("--user_id", type=str, help="Optional User ID for multi-tenant API key retrieval.")
+    args = parser.parse_args()
 
-    parsed_cli_args = cmd_arg_parser.parse_args()
-
-    logger.info(f"Agent CLI: Starting with Query='{parsed_cli_args.query}', Market='{parsed_cli_args.market}', Question='{parsed_cli_args.question or 'N/A'}'")
-    # Note: This local CLI runner will need to be adapted to run an async function,
-    # e.g., using asyncio.run()
     import asyncio
-    cli_run_output = asyncio.run(run_market_intelligence_agent(
-        query_str=parsed_cli_args.query,
-        market_domain_str=parsed_cli_args.market,
-        question_str=parsed_cli_args.question
-    ))
-
-    print("--- Agent CLI Run Summary ---")
-    print(f"Success: {cli_run_output.get('success')}")
-    print(f"State ID: {cli_run_output.get('state_id')}")
-    print(f"Report Directory (relative to /tmp or api_python/reports1): {cli_run_output.get('report_dir_relative')}")
-    print(f"Report Filename: {cli_run_output.get('report_filename')}")
-    if cli_run_output.get("query_response"):
-        print(f"RAG Query Response: {cli_run_output.get('query_response')}")
-    if cli_run_output.get("error"):
-        print(f"Error Message: {cli_run_output.get('error')}")
-
-    if cli_run_output.get("success"):
-        print("To view results, check the 'reports1' directory (likely in '/tmp/reports1/' on Vercel or 'api_python/reports1/' locally), then find the subdirectory indicated by 'report_dir_relative'.")
-    else:
-        print("Agent run encountered errors. Please check logs ('market_intelligence.log', 'market_intelligence_errors.log') in the Python function's log (Vercel) or 'api_python/' directory (local) for details.")
+    
+    # To run the async function from a sync entry point
+    try:
+        result = asyncio.run(run_market_intelligence_agent(args.query, args.domain, args.question, args.user_id))
+        print(json.dumps(result, indent=2))
+    except KeyboardInterrupt:
+        logger.info("Agent run interrupted by user.")
+    except Exception as e:
+        error_logger.critical(f"Agent CLI: A critical error occurred: {e}")
