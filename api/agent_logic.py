@@ -107,78 +107,20 @@ def _extract_text_from_txt(file_path: str) -> str:
         error_logger.error(f"Error extracting text from TXT {file_path}: {e}")
         return ""
 
-# Import required libraries with proper error handling
-try:
-    from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-    from langchain_core.output_parsers import StrOutputParser
-    from langchain_core.messages import HumanMessage, AIMessage
-    from langgraph.graph import StateGraph, END
-    from langchain_community.document_loaders import WebBaseLoader
-    from langchain_community.vectorstores import FAISS
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
-    # RetrievalQA is locally imported in rag_query_handler where needed
-    from supabase import create_client, Client as SupabaseClient
-    from langchain_google_genai import ChatGoogleGenerativeAI
-except ImportError as e:
-    print(f"Error importing LangChain libraries: {e}")
-    print(
-        "Please install required packages: pip install langchain langchain_core langgraph langchain_community supabase langchain-google-genai"
-    )
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.graph import StateGraph, END
+from langchain_community.document_loaders import WebBaseLoader
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from supabase import create_client, Client as SupabaseClient
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
 from cachetools import TTLCache
-
-# Import optional libraries with fallbacks
-try:
-    from newsapi import NewsApiClient
-except ImportError:
-    NewsApiClient = None
-    print("newsapi-python not installed. NewsAPI functionality will be disabled.")
-
-try:
-    from serpapi import GoogleSearch as SerpApiClient
-except ImportError:
-    SerpApiClient = None
-    print("google-search-results not installed. SerpAPI functionality will be disabled.")
-
-try:
-    import fmpsdk
-except ImportError:
-    fmpsdk = None
-    print("fmpsdk not installed. Financial Modeling Prep functionality will be disabled.")
-
-try:
-    from alpha_vantage.timeseries import TimeSeries
-    from alpha_vantage.fundamentaldata import FundamentalData
-except ImportError:
-    TimeSeries = None
-    FundamentalData = None
-    print("alpha_vantage not installed. Alpha Vantage functionality will be disabled.")
-
-try:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    import pandas as pd
-    import numpy as np
-except ImportError:
-    plt = None
-    sns = None
-    pd = None
-    np = None
-    print("matplotlib/seaborn/pandas/numpy not installed. Chart generation will be disabled.")
-
-try:
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
-    from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.lib.units import inch
-except ImportError:
-    SimpleDocTemplate = None
-    print("reportlab not installed. PDF generation will be disabled.")
 
 # Configure logging
 logging.basicConfig(
@@ -201,7 +143,7 @@ if "USER_AGENT" not in os.environ:
 
 load_dotenv()
 search_results_cache = TTLCache(maxsize=100, ttl=3600)
-_supabase_client_instance: Optional[SupabaseClient] = None
+_supabase_client_instance = None
 
 def get_supabase_client() -> Optional[SupabaseClient]:
     global _supabase_client_instance
@@ -218,9 +160,7 @@ def get_supabase_client() -> Optional[SupabaseClient]:
             if "//" in supabase_url:
                 url_domain_part = supabase_url.split("//")[-1].split(".")[0]
             logger.info(f"Initializing Supabase client for agent_logic with URL domain: {url_domain_part}...")
-            if "SupabaseClient" not in globals() or globals()["SupabaseClient"] is None:
-                error_logger.error("SupabaseClient type not available. Cannot initialize client.")
-                return None
+            
             _supabase_client_instance = create_client(supabase_url, supabase_key)
             logger.info("Supabase client for agent_logic initialized successfully.")
             return _supabase_client_instance
