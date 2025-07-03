@@ -352,8 +352,10 @@ async def shutdown_db_client():
 
 
 # Import real agent functions
-import agent_logic  # Use `.` for relative import in a package
-
+from api import agent_logic # Adjusted for clarity if main.py is run from outside api dir sometimes
+                            # but for uvicorn from api dir, `import agent_logic` or `from . import agent_logic` is fine.
+                            # Let's stick to `from api import agent_logic` for robustness in various run contexts.
+                            # Or, more standardly for a package: `from . import agent_logic`
 
 # Global error handler
 @app.exception_handler(Exception)
@@ -393,51 +395,137 @@ async def health_check():
 @app.post("/api/analyze")
 async def analyze(analysis_request: AnalysisRequest, user=Depends(get_current_user)):
     try:
-        logger.info(f"Analysis request: {request.query} for domain: {request.market_domain}")
+        logger.info(f"Analysis request received: Query='{analysis_request.query}', Domain='{analysis_request.market_domain}', UserID='{user.id}', FileIDs='{analysis_request.uploaded_file_ids}'")
 
-        # Generate AI-powered insights
-        insights = await ai_agent.generate_insights(
-            request.query,
-            {"market_domain": request.market_domain, "question": request.question}
+        # Call the actual agent logic
+        # Ensure agent_logic is imported correctly at the top of the file
+        # e.g., from . import agent_logic or from api import agent_logic
+        agent_result = await agent_logic.run_market_intelligence_agent(
+            query_str=analysis_request.query,
+            market_domain_str=analysis_request.market_domain,
+            question_str=analysis_request.question,
+            user_id=str(user.id),
+            uploaded_document_ids=analysis_request.uploaded_file_ids
         )
-        
-        # Store analysis in database
-        if supabase:
-            try:
-                analysis_record = {
-                    "user_id": user.id,
-                    "query": request.query,
-                    "market_domain": request.market_domain,
-                    "question": request.question,
-                    "insights": insights,
-                    "created_at": datetime.now().isoformat()
-                }
-                
-                result = supabase.table("market_analyses").insert(analysis_record).execute()
-                logger.info(f"Analysis stored with ID: {result.data[0]['id'] if result.data else 'unknown'}")
-            except Exception as db_error:
-                logger.warning(f"Failed to store analysis in database: {db_error}")
-                # Continue without failing the request
 
-        analysis_result = {
-            "query": request.query,
-            "market_domain": request.market_domain,
-            "question": request.question,
-            "analysis": insights.get("insights", []),
-            "recommendations": insights.get("recommendations", []),
-            "confidence_score": insights.get("confidence_score", 0.87),
-            "timestamp": datetime.now().isoformat(),
-            "metadata": {
-                "processing_time_ms": 1250,
-                "data_sources": insights.get("data_sources", []),
-                "version": "1.0.0"
+        report_status = "completed" if agent_result.get("success") else "failed"
+        report_file_path = None
+        if agent_result.get("success") and agent_result.get("report_dir_relative") and agent_result.get("report_filename"):
+            # Construct a conceptual path. Actual storage/retrieval might differ.
+            report_file_path = f"{agent_result.get('report_dir_relative')}/{agent_result.get('report_filename')}"
+        
+        report_title = f"Analysis for '{analysis_request.query}' in '{analysis_request.market_domain}'"
+
+        # Store a reference in the 'reports' table
+        if supabase:
+            report_record = {
+                "user_id": str(user.id),
+                "title": report_title[:255], # Ensure title fits in VARCHAR(255)
+                "market_domain": analysis_request.market_domain,
+                "query_text": analysis_request.query,
+                "status": report_status,
+                "report_data": { # Store key results or references
+                    "state_id": agent_result.get("state_id"),
+                    "agent_query_response": agent_result.get("query_response"),
+                    "error_message": agent_result.get("error") if not agent_result.get("success") else None,
+                    "chart_filenames": agent_result.get("chart_filenames"),
+                    "download_files": agent_result.get("download_files")
+                },
+                "file_path": report_file_path, # Path to the main markdown report
+                # created_at and updated_at will be set by DB defaults
             }
+            try:
+                insert_op = supabase.table("reports").insert(report_record).execute()
+                if insert_op.data:
+                    logger.info(f"Report record stored in Supabase 'reports' table with ID: {insert_op.data[0]['id']}")
+                    # Return the agent_result which includes state_id etc.
+                    # The frontend might use state_id to later fetch report details or files.
+                    return {
+                        "success": agent_result.get("success"),
+                        "message": "Analysis processing initiated." if agent_result.get("success") else "Analysis processing failed.",
+                        "state_id": agent_result.get("state_id"),
+                        "report_db_id": insert_op.data[0]['id'], # ID from 'reports' table
+                        "details": agent_result # Full agent result for client if needed
+                    }
+                else:
+                    logger.error(f"Failed to store report record in Supabase 'reports' table: {insert_op.error.message if insert_op.error else 'Unknown error'}")
+                    # Even if DB store fails, the agent might have run. Return agent status.
+                    # Or raise an error if this DB store is critical for the flow.
+                    # For now, log error and proceed with agent result.
+                    # Fall through to return agent_result directly but log the DB error.
+            except Exception as db_error:
+                logger.error(f"Exception storing report record to Supabase 'reports': {db_error}\n{traceback.format_exc()}")
+                # Fall through to return agent_result, but with a warning about DB persistence.
+
+        # Fallback return if Supabase interaction failed but agent ran
+        return {
+            "success": agent_result.get("success"),
+            "message": "Analysis processing completed but report metadata might not have been saved.",
+            "state_id": agent_result.get("state_id"),
+            "details": agent_result
         }
 
-        return analysis_result
     except Exception as e:
-        logger.error(f"Analysis error in /api/analyze: {str(e)}\n{traceback.format_exc()}")
+        logger.error(f"Error in /api/analyze endpoint: {str(e)}\n{traceback.format_exc()}")
+        # Attempt to store a 'failed' record in reports table even if agent run fails early
+        if supabase and user and analysis_request: # Ensure we have necessary info
+             try:
+                report_title_on_error = f"Failed Analysis for '{analysis_request.query}'"
+                supabase.table("reports").insert({
+                    "user_id": str(user.id),
+                    "title": report_title_on_error[:255],
+                    "market_domain": analysis_request.market_domain,
+                    "query_text": analysis_request.query,
+                    "status": "failed",
+                    "report_data": {"error_message": str(e)[:1000]} # Store snippet of error
+                }).execute()
+             except Exception as db_e_on_fail:
+                 logger.error(f"Failed to store error report: {db_e_on_fail}")
+
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+
+@app.get("/api/reports", response_model=List[Dict[str, Any]])
+async def list_reports_for_user(user=Depends(get_current_user), limit: int = 50, offset: int = 0):
+    """
+    Lists all analysis reports for the authenticated user from the 'reports' table.
+    """
+    logger.info(f"GET /api/reports: UserID='{user.id}', Limit={limit}, Offset={offset}")
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Database connection not available.")
+
+    try:
+        # Select specific fields to return for the list view.
+        # Include 'id' (report_db_id), 'title', 'market_domain', 'status', 'created_at'.
+        # Also extract 'state_id' from 'report_data' JSONB field.
+        # Note: Accessing JSONB fields in select might vary slightly based on Supabase/Postgres version or client library features.
+        # The `->>` operator casts JSONB value to text.
+        reports_response = supabase.table("reports") \
+            .select("id, title, market_domain, status, created_at, report_data->>state_id") \
+            .eq("user_id", str(user.id)) \
+            .order("created_at", desc=True) \
+            .limit(limit) \
+            .offset(offset) \
+            .execute()
+
+        if reports_response.data:
+            # Rename 'report_data->>state_id' to 'state_id' in the response if needed by frontend,
+            # or ensure frontend can handle the default naming if direct.
+            # For now, let's assume the default naming is acceptable or frontend adapts.
+            # If a direct rename is needed:
+            # formatted_reports = []
+            # for report in reports_response.data:
+            #     new_report = {**report}
+            #     new_report["state_id"] = new_report.pop("report_data->>state_id", None) # Example rename
+            #     formatted_reports.append(new_report)
+            # return formatted_reports
+            return reports_response.data
+        else:
+            return [] # Return empty list if no reports found or error in data
+
+    except Exception as e:
+        logger.error(f"Error listing reports for user {user.id}: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to list reports: {str(e)}")
 
 
 @app.post("/api/chat")
@@ -1293,6 +1381,90 @@ async def update_user_preferences(preferences: UserPreferences, user=Depends(get
         logger.error(f"Error updating preferences for user {user_id_str}: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Failed to update user preferences")
 
+# User Profile Endpoints (Added for Phase 2.4.1)
+@app.get("/api/users/me/profile", response_model=Dict[str, Any])
+async def get_user_profile(user=Depends(get_current_user)):
+    if not user: # get_current_user should raise HTTPException if no valid user
+        logger.error("get_user_profile: Unlikely scenario - user is None after Depends(get_current_user).")
+        raise HTTPException(status_code=401, detail="Not authenticated or user data unavailable.")
+
+    # Safely access user_metadata and its properties
+    user_metadata = user.user_metadata if hasattr(user, 'user_metadata') else {}
+
+    profile_data = {
+        "id": str(user.id),
+        "email": user.email,
+        "full_name": user_metadata.get("full_name"),
+        "avatar_url": user_metadata.get("avatar_url"),
+        "created_at": user.created_at.isoformat() if hasattr(user, 'created_at') and user.created_at else None,
+        "last_sign_in_at": user.last_sign_in_at.isoformat() if hasattr(user, 'last_sign_in_at') and user.last_sign_in_at else None,
+        "onboarding_complete": user_metadata.get("onboarding_complete", False), # Default to False if not set
+        "dashboard_widgets": user_metadata.get("dashboard_widgets", []) # Default to empty list
+    }
+    return profile_data
+
+@app.put("/api/users/me/profile", response_model=Dict[str, Any])
+async def update_user_profile(profile_update: UserProfileUpdateRequest, user=Depends(get_current_user)):
+    if not supabase:
+        logger.error("update_user_profile: Supabase client not available.")
+        raise HTTPException(status_code=500, detail="Service misconfiguration: Auth service unavailable.")
+    if not user: # Should be caught by Depends(get_current_user)
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+
+    user_id_str = str(user.id)
+    metadata_to_update = {} # Only include fields that are actually being changed
+
+    if profile_update.full_name is not None:
+        metadata_to_update["full_name"] = profile_update.full_name
+    if profile_update.avatar_url is not None:
+        metadata_to_update["avatar_url"] = profile_update.avatar_url
+
+    if not metadata_to_update:
+        # It's better to return the current profile than an error if no actual changes are requested.
+        # Or, a 304 Not Modified, but that's more complex.
+        # For now, let's return current profile data fetched freshly.
+        logger.info(f"update_user_profile called for user {user_id_str} with no actual data fields to update.")
+        # Re-fetch to ensure we return the latest state, though user object from Depends should be fresh.
+        return await get_user_profile(user)
+
+
+    try:
+        # Merge with existing metadata to only update provided fields
+        # Ensure user.user_metadata is not None (it can be if never set)
+        existing_metadata = user.user_metadata if user.user_metadata is not None else {}
+        new_metadata_payload = {**existing_metadata, **metadata_to_update}
+
+        # Use supabase.auth.update_user for the currently authenticated user
+        update_response = await supabase.auth.update_user(
+            {"data": new_metadata_payload} # 'data' is the key for user_metadata updates
+        )
+
+        if update_response.user:
+            logger.info(f"User profile updated successfully for user_id: {user_id_str}")
+            refreshed_user = update_response.user
+            # Construct response from the refreshed_user object
+            return {
+                "id": str(refreshed_user.id),
+                "email": refreshed_user.email,
+                "full_name": refreshed_user.user_metadata.get("full_name"),
+                "avatar_url": refreshed_user.user_metadata.get("avatar_url"),
+                "onboarding_complete": refreshed_user.user_metadata.get("onboarding_complete", False),
+                "dashboard_widgets": refreshed_user.user_metadata.get("dashboard_widgets", [])
+            }
+        elif update_response.error:
+            error_detail = f"Failed to update profile: {update_response.error.message}"
+            logger.error(f"Supabase auth.update_user error for {user_id_str}: {update_response.error.message}")
+            raise HTTPException(status_code=400, detail=error_detail) # 400 for bad request often from Supabase
+        else:
+            logger.error(f"User profile update for {user_id_str} had no user object and no error in response. This is unexpected.")
+            raise HTTPException(status_code=500, detail="Failed to update profile due to an unexpected auth server response.")
+
+    except HTTPException: # Re-raise HTTPExceptions from Supabase client or our own logic
+        raise
+    except Exception as e:
+        logger.error(f"Exception during user profile update for {user_id_str}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to update profile due to an internal error: {str(e)}")
+
 
 # Application Settings Endpoints
 @app.get("/api/app-settings", response_model=List[AppSettingItem])
@@ -1421,68 +1593,105 @@ async def get_kpi(timeframe: str = "latest", category: str = "all", user=Depends
         # Fetch total trends and opportunities (if cron stores them, or calculate if possible)
         # This is a simplified example; a real system might need more complex aggregation.
         # Let's assume the cron job *could* store these as cumulative totals as well.
-        total_trends_res = supabase.table("kpi_metrics") \
-            .select("metric_value") \
-            .eq("metric_name", "cumulative_total_trends") \
-            .is_("user_id", None) \
-            .order("period_end", desc=True) \
-            .limit(1) \
-            .maybe_single() \
-            .execute()
-        total_trends_identified = total_trends_res.data["metric_value"] if total_trends_res.data and total_trends_res.data.get("metric_value") is not None else 0
 
-        total_opportunities_res = supabase.table("kpi_metrics") \
-            .select("metric_value") \
-            .eq("metric_name", "cumulative_total_opportunities") \
-            .is_("user_id", None) \
-            .order("period_end", desc=True) \
-            .limit(1) \
-            .maybe_single() \
-            .execute()
-        total_opportunities_identified = total_opportunities_res.data["metric_value"] if total_opportunities_res.data and total_opportunities_res.data.get("metric_value") is not None else 0
+        # Fetch all required latest global KPI metrics in one go if possible, or separate calls
+        metric_names_to_fetch = [
+            "total_analyses_run_cumulative",
+            "total_documents_processed_cumulative",
+            "cumulative_total_trends",
+            "cumulative_total_opportunities",
+            "analyses_count_for_trend_opportunity_avg" # Fetched to use as denominator for averages
+        ]
 
-        avg_trends_per_analysis = (total_trends_identified / num_analyses) if num_analyses > 0 else 0
-        avg_ops_per_analysis = (total_opportunities_identified / num_analyses) if num_analyses > 0 else 0
+        fetched_kpis = {}
+        latest_date_recorded = None
 
-        # Constructing the response similar to the frontend's expectation
-        # The frontend KPICard expects: title, value, unit, change, icon, color
-        # We need to map our DB data to this. 'change' requires historical data.
+        for name in metric_names_to_fetch:
+            res = supabase.table("kpi_metrics") \
+                .select("metric_value, metric_unit, period_end, details") \
+                .eq("metric_name", name) \
+                .is_("user_id", None) \
+                .order("period_end", desc=True) \
+                .limit(1) \
+                .maybe_single() \
+                .execute()
+            if res.data:
+                fetched_kpis[name] = res.data
+                if latest_date_recorded is None or datetime.fromisoformat(res.data["period_end"]) > datetime.fromisoformat(latest_date_recorded):
+                    latest_date_recorded = res.data["period_end"]
+            else:
+                fetched_kpis[name] = None # Metric not found or no data
 
-        kpi_data_transformed = [
+        num_analyses = fetched_kpis.get("total_analyses_run_cumulative", {}).get("metric_value", 0)
+        num_docs_processed = fetched_kpis.get("total_documents_processed_cumulative", {}).get("metric_value", 0)
+
+        cumulative_trends = fetched_kpis.get("cumulative_total_trends", {}).get("metric_value", 0)
+        cumulative_ops = fetched_kpis.get("cumulative_total_opportunities", {}).get("metric_value", 0)
+        # Use analyses_count_for_trend_opportunity_avg as the denominator for averages
+        # This count represents analyses that actually had trend/opportunity data processed by the cron.
+        # If this specific metric isn't populated by cron, fallback to num_analyses (total completed analyses).
+        denominator_for_avg = fetched_kpis.get("analyses_count_for_trend_opportunity_avg", {}).get("metric_value", num_analyses)
+        if denominator_for_avg == 0 : # Avoid division by zero if no analyses were processed for these averages
+            denominator_for_avg = num_analyses # Fallback to total analyses, if still 0, avg will be 0.
+
+
+        avg_trends_per_analysis = (cumulative_trends / denominator_for_avg) if denominator_for_avg > 0 else 0
+        avg_ops_per_analysis = (cumulative_ops / denominator_for_avg) if denominator_for_avg > 0 else 0
+
+        # Format date_recorded to YYYY-MM-DD
+        date_recorded_str = datetime.fromisoformat(latest_date_recorded).strftime('%Y-%m-%d') if latest_date_recorded else datetime.now(dt_timezone.utc).strftime('%Y-%m-%d')
+
+        kpi_response_data = {
+            "total_analyses_run": num_analyses,
+            "documents_processed": num_docs_processed,
+            "avg_trends_identified": round(avg_trends_per_analysis, 1),
+            "avg_opportunities_identified": round(avg_ops_per_analysis, 1),
+            "date_recorded": date_recorded_str
+        }
+
+        # The frontend dashboard page expects a list of kpi objects in response.data.
+        # The new structure is a single object in response.data. This needs frontend adaptation.
+        # For now, I will adapt the backend to return the old list structure but with new data.
+        # This is temporary to avoid breaking the frontend immediately.
+        # TODO: Coordinate with frontend to accept the new simpler object structure for KPIs.
+
+        kpi_data_transformed_for_frontend_list = [
             {
-                "metric_name": "Total Analyses Run", # Title for KPICard
-                "metric_value": num_analyses,
-                "metric_unit": analyses_res.data.get("metric_unit", "count") if analyses_res.data else "count",
-                "change_percentage": 0, # Placeholder, requires previous period data
-                "details": analyses_res.data.get("details", {}) if analyses_res.data else {}
+                "metric_name": "Total Analyses Run",
+                "metric_value": kpi_response_data["total_analyses_run"],
+                "metric_unit": fetched_kpis.get("total_analyses_run_cumulative", {}).get("metric_unit", "count"),
+                "change_percentage": 0, # Placeholder
             },
             {
                 "metric_name": "Total Documents Processed",
-                "metric_value": docs_res.data["metric_value"] if docs_res.data and docs_res.data.get("metric_value") is not None else 0,
-                "metric_unit": docs_res.data.get("metric_unit", "count") if docs_res.data else "count",
+                "metric_value": kpi_response_data["documents_processed"],
+                "metric_unit": fetched_kpis.get("total_documents_processed_cumulative", {}).get("metric_unit", "count"),
                 "change_percentage": 0, # Placeholder
-                "details": docs_res.data.get("details", {}) if docs_res.data else {}
             },
             {
                 "metric_name": "Avg. Trends per Analysis",
-                "metric_value": round(avg_trends_per_analysis, 1),
+                "metric_value": kpi_response_data["avg_trends_identified"],
                 "metric_unit": "trends/analysis",
                 "change_percentage": 0, # Placeholder
-                "details": {"description": "Average number of key trends identified per completed analysis."}
             },
             {
                 "metric_name": "Avg. Opportunities per Analysis",
-                "metric_value": round(avg_ops_per_analysis, 1),
+                "metric_value": kpi_response_data["avg_opportunities_identified"],
                 "metric_unit": "ops/analysis",
                 "change_percentage": 0, # Placeholder
-                "details": {"description": "Average number of opportunities identified per completed analysis."}
             }
         ]
 
-        # The frontend dashboard page uses this structure:
-        # response.data (which is an array of kpi objects)
-        # Each kpi object has: metric_name, metric_value, metric_unit, change_percentage
-        return {"data": kpi_data_transformed, "metadata": {"timeframe": timeframe, "category": category, "last_updated": datetime.now(dt_timezone.utc).isoformat()}}
+        return {
+            "data": kpi_data_transformed_for_frontend_list, # Returning list for now
+            # "data_object": kpi_response_data, # This is the target structure
+            "metadata": {
+                "timeframe": timeframe,
+                "category": category,
+                "last_updated": datetime.now(dt_timezone.utc).isoformat(),
+                "date_recorded_for_kpis": date_recorded_str
+            }
+        }
 
     except Exception as e:
         logger.error(f"KPI GET error: {str(e)}\n{traceback.format_exc()}")
@@ -2032,3 +2241,60 @@ async def get_customer_insights_data(analysis_id: Optional[str] = None, user=Dep
 
 # Need to import urlparse for the mock competitor data generation
 from urllib.parse import urlparse
+from fastapi.responses import FileResponse # For serving files
+
+# Agent State related endpoints (for downloads page)
+@app.get("/api/analysis-states/{state_id}/downloads-info") # Renamed slightly for clarity from just /downloads
+async def get_analysis_state_downloads_info(state_id: str, user=Depends(get_current_user)):
+    logger.info(f"GET /api/analysis-states/{state_id}/downloads-info: UserID='{user.id}'")
+    if not state_id:
+        raise HTTPException(status_code=400, detail="State ID is required.")
+
+    try:
+        # Assuming get_state_download_info from agent_logic handles user_id check internally for ownership
+        # or returns None if state_id doesn't belong to user or doesn't exist.
+        download_info = agent_logic.get_state_download_info(state_id=state_id, user_id=str(user.id))
+        if not download_info:
+            # This could be 404 if state not found, or 403 if not owned.
+            # get_state_download_info logs details, so a generic 404 is fine here.
+            raise HTTPException(status_code=404, detail="Analysis state not found or not accessible.")
+
+        return download_info # Structure should be like {"state_id": ..., "files": [{"category": ..., "filename": ...}]}
+    except HTTPException:
+        raise # Re-raise known HTTP exceptions
+    except Exception as e:
+        logger.error(f"Error getting download info for state {state_id}, user {user.id}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve download information.")
+
+@app.get("/api/analysis-states/{state_id}/download-file/{file_identifier}")
+async def download_analysis_file(state_id: str, file_identifier: str, user=Depends(get_current_user)):
+    logger.info(f"GET /api/analysis-states/{state_id}/download-file/{file_identifier}: UserID='{user.id}'")
+    if not state_id or not file_identifier:
+        raise HTTPException(status_code=400, detail="State ID and file identifier are required.")
+
+    try:
+        # get_download_file_path in agent_logic should handle ownership check and path validation
+        file_path_str = agent_logic.get_download_file_path(state_id=state_id, user_id=str(user.id), file_identifier=file_identifier)
+
+        if not file_path_str:
+            raise HTTPException(status_code=404, detail="File not found or not accessible.")
+
+        # Check if file exists, just in case get_download_file_path didn't fully validate existence (it should)
+        if not os.path.exists(file_path_str) or not os.path.isfile(file_path_str):
+            logger.error(f"File path resolved but file does not exist or is not a file: {file_path_str}")
+            raise HTTPException(status_code=404, detail="File not found on server.")
+
+        # Use original filename for download if available, otherwise use file_identifier
+        # This might require get_download_file_path to return more than just the path,
+        # or we derive it from file_identifier if it's the actual filename.
+        # For now, using file_identifier as the download name.
+        # A better approach: get_state_download_info could provide the original filename for each identifier.
+        # The `file_identifier` from the frontend IS the `filename` from `DownloadableFile` interface.
+
+        return FileResponse(path=file_path_str, filename=file_identifier, media_type='application/octet-stream')
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading file {file_identifier} for state {state_id}, user {user.id}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Failed to download file.")

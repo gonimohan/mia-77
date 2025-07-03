@@ -1852,25 +1852,84 @@ async def run_market_intelligence_agent(
         }
 
 
-async def chat_with_agent(message: str, session_id: str, history: List[Dict[str, Any]], user_id: Optional[str] = None) -> str:
-    # Ensure necessary imports are available
-    # from langchain_google_genai import ChatGoogleGenerativeAI
-    # import os
-    # logger, error_logger, get_api_key, ChatPromptTemplate, MessagesPlaceholder, StrOutputParser, HumanMessage, AIMessage, save_chat_message, load_chat_history, traceback
-
-    logger.info(f"Agent Chat: Received message for session_id {session_id}, UserID: {user_id or 'N/A'}: '{message[:100]}...'") # Log UserID
+async def chat_with_agent(
+    message: str,
+    session_id: str,
+    history: List[Dict[str, Any]],
+    user_id: Optional[str] = None,
+    request_context: Optional[Dict[str, Any]] = None # For file context
+) -> str:
+    logger.info(f"Agent Chat: SessionID {session_id}, UserID: {user_id or 'N/A'}, Message: '{message[:100]}...', Context: {request_context is not None}")
     save_chat_message(session_id, "user", message)
 
     langchain_history = []
-    for msg_data in history: # history is already loaded by MarketIntelligenceAgent.chat if it was None
+    for msg_data in history:
         if msg_data["type"] == "user":
             langchain_history.append(HumanMessage(content=msg_data["content"]))
         elif msg_data["type"] == "ai":
             langchain_history.append(AIMessage(content=msg_data["content"]))
 
+    context_str_for_llm = ""
+    context_files_summary = "No file context provided."
+
+    if request_context and request_context.get("files") and user_id:
+        files_in_context = request_context.get("files", [])
+        if files_in_context:
+            logger.info(f"Chat RAG: Processing {len(files_in_context)} files for context for user {user_id}.")
+            context_files_summary = f"Using context from {len(files_in_context)} file(s): {', '.join([f.get('filename', f.get('file_id', 'unknown')) for f in files_in_context])}"
+
+            all_file_texts = []
+            supabase = get_supabase_client()
+            if supabase:
+                for file_info in files_in_context:
+                    file_id = file_info.get("file_id")
+                    if file_id:
+                        try:
+                            # Ensure user owns the document they are trying to use in context
+                            doc_response = supabase.table("documents").select("text, original_filename").eq("id", file_id).eq("uploader_id", user_id).maybe_single().execute()
+                            if doc_response.data and doc_response.data.get("text"):
+                                all_file_texts.append(doc_response.data["text"])
+                                logger.debug(f"Chat RAG: Loaded text for file_id {file_id} (filename: {doc_response.data.get('original_filename', 'N/A')})")
+                            else:
+                                logger.warning(f"Chat RAG: File {file_id} not found or no text content for user {user_id}.")
+                        except Exception as e_fetch_doc_text:
+                            error_logger.error(f"Chat RAG: Error fetching text for file {file_id}: {e_fetch_doc_text}")
+
+            if all_file_texts:
+                try:
+                    # Combine all texts and create an on-the-fly vector store
+                    combined_text = "\n\n--- (New Document Context) ---\n\n".join(all_file_texts)
+                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
+                    chunks = text_splitter.split_text(combined_text)
+
+                    if chunks:
+                        logger.info(f"Chat RAG: Created {len(chunks)} chunks from {len(all_file_texts)} files for in-memory FAISS.")
+                        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+                        # Allow dangerous deserialization for FAISS if it's loaded from disk, not strictly needed for from_texts
+                        vector_store = FAISS.from_texts(texts=chunks, embedding=embeddings)
+
+                        # Retrieve top N relevant chunks based on the user's message
+                        retriever = vector_store.as_retriever(search_kwargs={"k": 3}) # Get top 3 chunks
+                        relevant_docs = retriever.get_relevant_documents(message)
+
+                        if relevant_docs:
+                            context_str_for_llm = "\n\n--- Relevant Context from Uploaded Files ---\n"
+                            for i, doc_chunk in enumerate(relevant_docs):
+                                context_str_for_llm += f"\n[Excerpt {i+1} from files]:\n{doc_chunk.page_content}\n---"
+                            logger.info(f"Chat RAG: Retrieved {len(relevant_docs)} relevant chunks for the query.")
+                        else:
+                            logger.info("Chat RAG: No relevant chunks found in provided files for the query.")
+                            context_str_for_llm = "\n\n--- Context from Uploaded Files (No specific relevant excerpts found, general content considered) ---"
+                            # Optionally, include a summary or just the fact that files were considered.
+                    else:
+                        logger.warning("Chat RAG: No text chunks generated from files, skipping vector store creation.")
+                except Exception as e_rag_process:
+                    error_logger.error(f"Chat RAG: Error during in-memory RAG processing: {e_rag_process}\n{traceback.format_exc()}")
+                    context_str_for_llm = "\n\n[Error processing file context for RAG]\n"
+
     try:
         user_google_api_key = get_api_key("GOOGLE_GEMINI", user_id=user_id)
-        llm_temperature = 0.7 # Original temperature for chat
+        llm_temperature = 0.7
 
         if user_google_api_key:
             logger.info(f"Chat: Using user-provided Google Gemini API key for session {session_id}, UserID {user_id}")
@@ -1880,11 +1939,15 @@ async def chat_with_agent(message: str, session_id: str, history: List[Dict[str,
             if not os.getenv("GOOGLE_API_KEY"):
                 error_logger.warning(f"Chat: GOOGLE_API_KEY not found in environment for default LLM init for session {session_id}.")
             chat_llm = ChatGoogleGenerativeAI(model="gemini-pro", temperature=llm_temperature)
-            # Stricter fallback if needed:
-            # chat_llm = init_chat_model(model_name="gemini-pro", model_provider="google_genai", temperature=llm_temperature)
+
+        system_message_content = "You are a helpful assistant. Respond to the user's query. "
+        if context_str_for_llm:
+            system_message_content += f"Base your answer primarily on the following context from uploaded files if relevant, otherwise indicate that the files were not relevant to the query. \n{context_files_summary}\n{context_str_for_llm}"
+        else:
+            system_message_content += "Use your general knowledge if no specific file context is provided or relevant."
 
         prompt_template = ChatPromptTemplate.from_messages([
-            ("system", "You are a helpful assistant. Respond to the user's query based on the provided chat history."),
+            ("system", system_message_content),
             MessagesPlaceholder(variable_name="chat_history"),
             ("human", "{input}")
         ])
@@ -1893,7 +1956,7 @@ async def chat_with_agent(message: str, session_id: str, history: List[Dict[str,
         response_text = await chain.ainvoke({"input": message, "chat_history": langchain_history})
 
         save_chat_message(session_id, "ai", response_text)
-        logger.info(f"Agent Chat: Response generated for session_id {session_id}, UserID {user_id or 'N/A'}.")
+        logger.info(f"Agent Chat: Response generated for session_id {session_id}, UserID {user_id or 'N/A'}. File context used: {bool(context_str_for_llm)}")
         return response_text
 
     except ValueError as ve:

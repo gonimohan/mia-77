@@ -9,15 +9,15 @@ import { Separator } from "@/components/ui/separator"
 import { useToast } from "@/hooks/use-toast"
 import { useAuth } from "@/components/auth-provider" // Import useAuth
 
-// Interfaces matching backend Pydantic models
-interface AnalysisStateSummary {
-  state_id: string;
+// Interface for report items listed from /api/reports
+interface ReportListItem {
+  id: string; // This is the UUID of the report record in Supabase 'reports' table
+  title: string;
   market_domain?: string | null;
-  query?: string | null;
-  created_at: string; // ISO string
-  user_id?: string | null;
-  report_filename?: string | null;
   status?: string | null;
+  created_at: string; // ISO string
+  state_id?: string | null; // This is the agent's state_id, crucial for fetching files
+  // query_text might also be useful to display, if returned by /api/reports
 }
 
 interface DownloadableFile {
@@ -28,12 +28,12 @@ interface DownloadableFile {
 
 export default function DownloadsPage() {
   const { toast } = useToast();
-  const { supabaseClient, user, loading: authLoading, isConfigured } = useAuth(); // Use client from AuthProvider
+  const { supabaseClient, user, loading: authLoading, isConfigured } = useAuth();
 
-  const [analysisStates, setAnalysisStates] = useState<AnalysisStateSummary[]>([]);
-  const [selectedStateId, setSelectedStateId] = useState<string | null>(null);
+  const [reportsList, setReportsList] = useState<ReportListItem[]>([]); // Changed state variable name
+  const [selectedReport, setSelectedReport] = useState<ReportListItem | null>(null); // Store the whole report object
   const [selectedStateFiles, setSelectedStateFiles] = useState<DownloadableFile[]>([]);
-  const [isLoadingStates, setIsLoadingStates] = useState(true);
+  const [isLoadingReports, setIsLoadingReports] = useState(true); // Changed state variable name
   const [isLoadingFiles, setIsLoadingFiles] = useState(false);
 
   const getAuthToken = async () => {
@@ -47,98 +47,81 @@ export default function DownloadsPage() {
     return session?.access_token;
   };
 
-  const fetchAnalysisStates = async () => {
-    if (!supabaseClient || !isConfigured) { // Check supabaseClient and configuration
-      setIsLoadingStates(false);
-      if (!authLoading && !isConfigured) {
-         toast({ title: "Configuration Error", description: "Supabase is not configured. Cannot fetch analyses.", variant: "destructive" });
+  const fetchReportsList = async () => { // Renamed function
+    if (!isConfigured) { // Simpler check, authProvider handles session
+      setIsLoadingReports(false);
+      if (!authLoading) { // Avoid toast if auth is still loading
+         toast({ title: "Configuration Error", description: "Service is not configured. Cannot fetch reports.", variant: "destructive" });
       }
       return;
     }
-    setIsLoadingStates(true);
+    setIsLoadingReports(true);
     try {
-      const token = await getAuthToken();
-      if (!token) {
-        // This case should be handled by auth checks before calling, or by getAuthToken itself.
-        // If still no token, user might be logged out. AuthProvider should manage redirects.
-        toast({ title: "Authentication Error", description: "Session not found. Please log in again.", variant: "destructive" });
-        setAnalysisStates([]);
-        setIsLoadingStates(false);
-        return;
-      }
-
-      const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL}/analysis-states`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      // Calls Next.js API route /api/reports which handles auth
+      const response = await fetch(`/api/reports`);
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ detail: "Failed to fetch analysis states."}));
+        const errorData = await response.json().catch(() => ({ detail: "Failed to fetch reports list."}));
         throw new Error(errorData.detail);
       }
-      const data: AnalysisStateSummary[] = await response.json();
-      setAnalysisStates(data);
+      const data: ReportListItem[] = await response.json();
+      setReportsList(data);
     } catch (error: any) {
-      console.error("Fetch Analysis States Error:", error);
-      toast({ title: "Error Fetching Analyses", description: error.message, variant: "destructive" });
-      setAnalysisStates([]);
+      console.error("Fetch Reports List Error:", error);
+      toast({ title: "Error Fetching Reports", description: error.message, variant: "destructive" });
+      setReportsList([]);
     } finally {
-      setIsLoadingStates(false);
+      setIsLoadingReports(false);
     }
   };
 
-  const fetchStateDownloadableFiles = async (stateId: string) => {
-    if (!stateId || !supabaseClient || !isConfigured) { // Check supabaseClient and configuration
+  const fetchStateDownloadableFiles = async (report: ReportListItem) => { // Takes ReportListItem
+    if (!report || !report.state_id ||!isConfigured) {
        setIsLoadingFiles(false);
-       if (!authLoading && !isConfigured) {
-          toast({ title: "Configuration Error", description: "Supabase is not configured. Cannot fetch files.", variant: "destructive" });
+       if (!report || !report.state_id) {
+            toast({ title: "Info", description: "This report has no associated analysis state or files.", variant: "default" });
+       } else if (!authLoading && !isConfigured) {
+          toast({ title: "Configuration Error", description: "Service is not configured. Cannot fetch files.", variant: "destructive" });
        }
+      setSelectedReport(report); // Still set selected report to show its details even if no files
+      setSelectedStateFiles([]);
       return;
     }
-    setSelectedStateId(stateId);
+    setSelectedReport(report);
     setIsLoadingFiles(true);
-    setSelectedStateFiles([]);
+    setSelectedStateFiles([]); // Clear previous files
     try {
-      const token = await getAuthToken();
-      if (!token) {
-        toast({ title: "Authentication Error", description: "Session not found. Please log in again.", variant: "destructive" });
-        setSelectedStateFiles([]);
-        setIsLoadingFiles(false);
-        return;
-      }
-
-      const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL}/analysis-states/${stateId}/downloads`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      // Calls Next.js API route, auth handled there
+      const response = await fetch(`/api/analysis-states/${report.state_id}/downloads-info`);
       if (!response.ok) {
-         const errorData = await response.json().catch(() => ({ detail: "Failed to fetch downloadable files."}));
+         const errorData = await response.json().catch(() => ({ detail: "Failed to fetch downloadable files for this report."}));
         throw new Error(errorData.detail);
       }
-      const data: { files: DownloadableFile[] } = await response.json();
+      const data: { files: DownloadableFile[] } = await response.json(); // Assuming Python returns {"files": [...]}
       setSelectedStateFiles(data.files || []);
     } catch (error: any) {
       console.error("Fetch Downloadable Files Error:", error);
-      toast({ title: "Error Fetching Files", description: error.message, variant: "destructive" });
+      toast({ title: "Error Fetching Report Files", description: error.message, variant: "destructive" });
       setSelectedStateFiles([]);
     } finally {
       setIsLoadingFiles(false);
     }
   };
 
-  const handleDownload = async (stateId: string, fileIdentifier: string, filenameToSave: string) => {
-    if (!supabaseClient || !isConfigured) { // Check supabaseClient and configuration
-      toast({ title: "Configuration Error", description: "Supabase is not configured.", variant: "destructive"});
+  const handleDownload = async (stateId: string | undefined, fileIdentifier: string, filenameToSave: string) => {
+    if (!stateId) {
+      toast({ title: "Error", description: "Analysis state ID is missing for download.", variant: "destructive"});
       return;
     }
-    const token = await getAuthToken();
-    if (!token) {
-      toast({ title: "Authentication Error", description: "Could not get auth token.", variant: "destructive"});
+    if (!isConfigured) {
+      toast({ title: "Configuration Error", description: "Service is not configured.", variant: "destructive"});
       return;
     }
+    // Auth is handled by the Next.js API route
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL}/analysis-states/${stateId}/downloads/${encodeURIComponent(fileIdentifier)}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      // Calls Next.js API route
+      const response = await fetch(`/api/analysis-states/${stateId}/download-file/${encodeURIComponent(fileIdentifier)}`);
       if (!response.ok) {
-        const errorData = await response.json().catch(() => null);
+        const errorData = await response.json().catch(() => ({ detail: "Download request failed." })); // Try to parse error from Next.js route
         throw new Error(errorData?.detail || `Download failed: ${response.statusText}`);
       }
       const blob = await response.blob();
@@ -157,16 +140,13 @@ export default function DownloadsPage() {
   };
 
   useEffect(() => {
-    // Fetch data only when auth state is settled, Supabase is configured, and client is available
-    if (!authLoading && isConfigured && supabaseClient) {
-      fetchAnalysisStates();
+    if (!authLoading && isConfigured) { // Removed supabaseClient from direct check, isConfigured implies it's ready via useAuth
+      fetchReportsList(); // Call renamed function
     } else if (!authLoading && !isConfigured) {
-      setIsLoadingStates(false); // Ensure loading stops if not configured
-      toast({ title: "Configuration Error", description: "Supabase is not configured. Cannot fetch data.", variant: "destructive" });
+      setIsLoadingReports(false);
+      toast({ title: "Configuration Error", description: "Service is not configured. Cannot fetch reports.", variant: "destructive" });
     }
-    // Not adding fetchAnalysisStates to deps to avoid re-runs if it's stable.
-    // If it changes, wrap in useCallback.
-  }, [authLoading, isConfigured, supabaseClient, toast]);
+  }, [authLoading, isConfigured, toast]); // Removed supabaseClient from deps, fetchReportsList uses isConfigured
 
 
   const getFileIcon = (filename: string) => {
@@ -255,36 +235,39 @@ export default function DownloadsPage() {
           <CardHeader>
             <CardTitle className="text-white flex items-center gap-2">
               <List className="w-5 h-5 text-neon-blue" />
-              Past Analyses
+              Generated Reports
             </CardTitle>
             <CardDescription className="text-gray-400">
-              Select an analysis to view and download its generated files.
+              Select a report to view and download its generated files.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            {isLoadingStates ? (
+            {isLoadingReports ? (
               <div className="flex items-center justify-center p-8">
                 <Loader2 className="w-8 h-8 text-neon-blue animate-spin" />
-                <p className="ml-2 text-white">Loading analyses...</p>
+                <p className="ml-2 text-white">Loading reports...</p>
               </div>
-            ) : analysisStates.length === 0 ? (
-              <p className="text-gray-400 text-center p-8">No past analyses found.</p>
+            ) : reportsList.length === 0 ? (
+              <p className="text-gray-400 text-center p-8">No past reports found.</p>
             ) : (
               <ul className="space-y-3 max-h-96 overflow-y-auto">
-                {analysisStates.map((state) => (
-                  <li key={state.state_id}>
+                {reportsList.map((report) => (
+                  <li key={report.id}> {/* Use report.id (from Supabase 'reports' table) as key */}
                     <Button
                       variant="ghost"
-                      className={`w-full justify-start p-3 text-left h-auto hover:bg-dark-bg/70 ${selectedStateId === state.state_id ? 'bg-neon-blue/20 text-neon-blue' : 'text-white'}`}
-                      onClick={() => fetchStateDownloadableFiles(state.state_id)}
-                      disabled={!supabaseClient || !isConfigured} // Disable if client not ready
+                      className={`w-full justify-start p-3 text-left h-auto hover:bg-dark-bg/70 ${selectedReport?.id === report.id ? 'bg-neon-blue/20 text-neon-blue' : 'text-white'}`}
+                      onClick={() => fetchStateDownloadableFiles(report)}
+                      disabled={!isConfigured}
                     >
                       <div className="flex flex-col">
-                        <span className="font-medium">Query: {state.query || "N/A"}</span>
+                        <span className="font-medium truncate" title={report.title}>{report.title}</span>
                         <span className="text-xs text-gray-400">
-                          Domain: {state.market_domain || "N/A"} | Created: {new Date(state.created_at).toLocaleString()}
+                          Domain: {report.market_domain || "N/A"} | Status: <span className={report.status === 'completed' ? 'text-neon-green' : 'text-neon-orange'}>{report.status || "Unknown"}</span>
                         </span>
-                        <span className="text-xs text-gray-500">ID: {state.state_id}</span>
+                        <span className="text-xs text-gray-500">
+                          Created: {new Date(report.created_at).toLocaleString()} | Report ID: {report.id.substring(0,8)}...
+                          {report.state_id && ` (State: ${report.state_id.substring(0,8)}...)`}
+                        </span>
                       </div>
                     </Button>
                   </li>
@@ -294,13 +277,16 @@ export default function DownloadsPage() {
           </CardContent>
         </Card>
 
-        {selectedStateId && (
+        {selectedReport && ( // Check selectedReport instead of selectedStateId
           <Card className="bg-dark-card border-dark-border mt-6">
             <CardHeader>
               <CardTitle className="text-white flex items-center gap-2">
                 <FileText className="w-5 h-5 text-neon-green" />
-                Downloadable Files for Analysis <span className="text-neon-green truncate max-w-xs">{selectedStateId}</span>
+                Downloadable Files for Report: <span className="text-neon-green truncate max-w-xs" title={selectedReport.title}>{selectedReport.title}</span>
               </CardTitle>
+               <CardDescription className="text-gray-400">
+                 Report ID: {selectedReport.id} | Agent State ID: {selectedReport.state_id || "N/A"}
+              </CardDescription>
             </CardHeader>
             <CardContent>
               {isLoadingFiles ? (
@@ -309,7 +295,9 @@ export default function DownloadsPage() {
                   <p className="ml-2 text-white">Loading files...</p>
                 </div>
               ) : selectedStateFiles.length === 0 ? (
-                <p className="text-gray-400 text-center p-8">No downloadable files found for this analysis.</p>
+                <p className="text-gray-400 text-center p-8">
+                  {selectedReport.state_id ? "No downloadable files found for this report's analysis state." : "This report has no associated analysis state to fetch files from."}
+                </p>
               ) : (
                 <div className="space-y-3">
                   {selectedStateFiles.map((file) => (
@@ -324,9 +312,10 @@ export default function DownloadsPage() {
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => handleDownload(selectedStateId, file.filename, file.filename)}
+                        // Use selectedReport.state_id for the download call
+                        onClick={() => handleDownload(selectedReport.state_id, file.filename, file.filename)}
                         className="border-neon-green/50 text-neon-green hover:bg-neon-green/10 ml-4"
-                        disabled={!supabaseClient || !isConfigured} // Disable if client not ready
+                        disabled={!isConfigured || !selectedReport.state_id}
                       >
                         <Download className="w-3 h-3 mr-1.5" />
                         Download
@@ -339,10 +328,10 @@ export default function DownloadsPage() {
           </Card>
         )}
 
-        {!selectedStateId && !isLoadingStates && analysisStates.length > 0 && (
+        {!selectedReport && !isLoadingReports && reportsList.length > 0 && ( // Check selectedReport
             <div className="text-center text-gray-500 p-8">
                 <Info className="w-6 h-6 mx-auto mb-2" />
-                Select an analysis from the list above to see its downloadable files.
+                Select a report from the list above to see its downloadable files.
             </div>
         )}
 

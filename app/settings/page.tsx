@@ -23,70 +23,121 @@ export default function SettingsPage() {
   const [displayName, setDisplayName] = useState("");
   const [initialDisplayName, setInitialDisplayName] = useState("");
   const [userEmail, setUserEmail] = useState("");
-  const [isSaving, setIsSaving] = useState(false);
-  // isPageLoading can be mostly replaced by authLoading and isConfigured checks
-  // but we might still want a distinct page loading state if there are other async ops for settings page itself.
-  // For now, let's rely on authLoading primarily.
+  const [isSavingProfile, setIsSavingProfile] = useState(false); // Renamed
+  const [isSavingPreferences, setIsSavingPreferences] = useState(false);
+  const [isPageLoading, setIsPageLoading] = useState(true); // Page-specific loading
 
+  // Preferences states - examples, can be expanded
+  const [notificationSettings, setNotificationSettings] = useState({
+    marketAlerts: true,
+    competitorUpdates: true,
+    dataSync: false,
+  });
+  const [dataManagementSettings, setDataManagementSettings] = useState({
+    retentionPeriod: "90days",
+    autoSyncFrequency: "hourly",
+    cacheLocally: true,
+  });
+  // Color palette selection is handled by ColorPaletteSelector and its context provider
+
+  // Fetch initial profile and preferences
   useEffect(() => {
-    if (!authLoading && user) {
-      const currentFullName = user.user_metadata?.full_name || user.user_metadata?.name || "";
-      setDisplayName(currentFullName);
-      setInitialDisplayName(currentFullName);
-      setUserEmail(user.email || "");
-    }
-    // If !authLoading and !user, it means user is not logged in, AuthProvider should handle redirects.
-  }, [user, authLoading]);
+    const fetchData = async () => {
+      if (!authLoading && user && isConfigured && supabaseClient) {
+        setIsPageLoading(true);
+        try {
+          // Fetch profile
+          const profileResponse = await fetch("/api/users/me/profile"); // Call Next.js API route
+          if (profileResponse.ok) {
+            const profileData = await profileResponse.json();
+            const currentFullName = profileData.full_name || "";
+            setDisplayName(currentFullName);
+            setInitialDisplayName(currentFullName);
+            setUserEmail(profileData.email || "");
+          } else {
+            toast({ title: "Error", description: "Failed to fetch profile data.", variant: "destructive" });
+          }
 
-  const getAuthToken = async () => {
-    if (!supabaseClient) return null; // Check supabaseClient
-    const { data: { session }, error } = await supabaseClient.auth.getSession(); // Use supabaseClient
-    if (error) {
-      toast({ title: "Authentication Error", description: error.message, variant: "destructive" });
-      return null;
-    }
-    return session?.access_token;
-  };
+          // Fetch preferences
+          const prefsResponse = await fetch("/api/users/me/preferences"); // Call Next.js API route
+          if (prefsResponse.ok) {
+            const prefsData = await prefsResponse.json();
+            if (prefsData.notification_settings) {
+              setNotificationSettings(prev => ({ ...prev, ...prefsData.notification_settings }));
+            }
+            if (prefsData.data_settings) {
+              setDataManagementSettings(prev => ({ ...prev, ...prefsData.data_settings }));
+            }
+            // Theme settings (color palette) are typically managed by a theme context globally
+          } else {
+            toast({ title: "Error", description: "Failed to fetch user preferences.", variant: "destructive" });
+          }
+        } catch (error: any) {
+          toast({ title: "Error", description: `Failed to load settings: ${error.message}`, variant: "destructive" });
+        } finally {
+          setIsPageLoading(false);
+        }
+      } else if (!authLoading && (!user || !isConfigured)) {
+        setIsPageLoading(false); // Not loading if user/config not ready
+      }
+    };
+    fetchData();
+  }, [user, authLoading, isConfigured, supabaseClient, toast]);
 
-  const handleSaveChanges = async () => {
-    if (!supabaseClient || !isConfigured) { // Check supabaseClient and configuration
-      toast({ title: "Error", description: "Supabase client not available or not configured.", variant: "destructive" });
+
+  const handleSaveProfileChanges = async () => {
+    if (!isConfigured) {
+      toast({ title: "Error", description: "Service not configured.", variant: "destructive" });
       return;
     }
-    setIsSaving(true);
-    const token = await getAuthToken();
-    if (!token) {
-      // getAuthToken already shows a toast for auth errors
-      setIsSaving(false);
-      return;
-    }
-
+    setIsSavingProfile(true);
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL}/users/me/profile`, {
+      // Calls Next.js API route which handles auth
+      const response = await fetch("/api/users/me/profile", {
         method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ full_name: displayName }),
       });
-
       const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.detail || "Failed to update profile.");
-      }
+      if (!response.ok) throw new Error(result.error || result.details || "Failed to update profile.");
 
       toast({ title: "Success", description: "Profile updated successfully." });
       setInitialDisplayName(displayName);
-
-      // Refresh Supabase session to get updated user metadata
-      await supabaseClient.auth.refreshSession(); // Use supabaseClient
-
+      // AuthProvider's onAuthStateChange should pick up user metadata changes after a refresh or next token renewal
+      // For immediate reflection if Supabase client is used directly for update:
+      if (supabaseClient) await supabaseClient.auth.refreshSession();
     } catch (error: any) {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
+      toast({ title: "Error Updating Profile", description: error.message, variant: "destructive" });
     } finally {
-      setIsSaving(false);
+      setIsSavingProfile(false);
+    }
+  };
+
+  const handleSavePreferences = async () => {
+    if (!isConfigured) {
+      toast({ title: "Error", description: "Service not configured.", variant: "destructive" });
+      return;
+    }
+    setIsSavingPreferences(true);
+    const payload = {
+      notification_settings: notificationSettings,
+      data_settings: dataManagementSettings,
+      // theme_settings could be included here if ColorPaletteSelector saved its state here
+    };
+    try {
+      // Calls Next.js API route which handles auth
+      const response = await fetch("/api/users/me/preferences", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || result.details || "Failed to save preferences.");
+      toast({ title: "Success", description: "Preferences saved successfully." });
+    } catch (error: any) {
+      toast({ title: "Error Saving Preferences", description: error.message, variant: "destructive" });
+    } finally {
+      setIsSavingPreferences(false);
     }
   };
 
@@ -284,41 +335,50 @@ export default function SettingsPage() {
               <CardContent className="space-y-4">
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5">
-                    <Label className="text-white">Market Alerts</Label>
+                      <Label htmlFor="marketAlertsSwitch" className="text-white">Market Alerts</Label>
                     <p className="text-sm text-gray-400">Get notified about significant market changes</p>
                   </div>
-                  <Switch defaultChecked />
+                    <Switch
+                      id="marketAlertsSwitch"
+                      checked={notificationSettings.marketAlerts}
+                      onCheckedChange={(checked) => setNotificationSettings(prev => ({...prev, marketAlerts: checked}))}
+                    />
                 </div>
 
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5">
-                    <Label className="text-white">Competitor Updates</Label>
+                      <Label htmlFor="competitorUpdatesSwitch" className="text-white">Competitor Updates</Label>
                     <p className="text-sm text-gray-400">Receive alerts about competitor activities</p>
                   </div>
-                  <Switch defaultChecked />
+                    <Switch
+                      id="competitorUpdatesSwitch"
+                      checked={notificationSettings.competitorUpdates}
+                      onCheckedChange={(checked) => setNotificationSettings(prev => ({...prev, competitorUpdates: checked}))}
+                    />
                 </div>
 
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5">
-                    <Label className="text-white">Data Sync Notifications</Label>
+                      <Label htmlFor="dataSyncSwitch" className="text-white">Data Sync Notifications</Label>
                     <p className="text-sm text-gray-400">Get notified when data sources sync</p>
                   </div>
-                  <Switch />
+                    <Switch
+                      id="dataSyncSwitch"
+                      checked={notificationSettings.dataSync}
+                      onCheckedChange={(checked) => setNotificationSettings(prev => ({...prev, dataSync: checked}))}
+                    />
                 </div>
-
-                <div className="space-y-2">
-                  <Label className="text-white">Notification Frequency</Label>
-                  <Select defaultValue="realtime">
-                    <SelectTrigger className="bg-dark-bg border-dark-border text-white">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent className="bg-dark-card border-dark-border">
-                      <SelectItem value="realtime">Real-time</SelectItem>
-                      <SelectItem value="hourly">Hourly</SelectItem>
-                      <SelectItem value="daily">Daily</SelectItem>
-                      <SelectItem value="weekly">Weekly</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  {/* Notification Frequency Select - can be added to notificationSettings state if needed */}
+                  {/* <div className="space-y-2"> ... </div> */}
+                  <div className="pt-4 border-t border-dark-border flex justify-end">
+                    <Button
+                      onClick={handleSavePreferences}
+                      disabled={isSavingPreferences || isPageLoading}
+                      className="bg-neon-green/80 hover:bg-neon-green/70 text-white"
+                    >
+                       {isSavingPreferences ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                       Save Notification Settings
+                    </Button>
                 </div>
               </CardContent>
             </Card>
@@ -337,7 +397,10 @@ export default function SettingsPage() {
               <CardContent className="space-y-4">
                 <div className="space-y-2">
                   <Label className="text-white">Data Retention Period</Label>
-                  <Select defaultValue="90days">
+                    <Select
+                      value={dataManagementSettings.retentionPeriod}
+                      onValueChange={(value) => setDataManagementSettings(prev => ({...prev, retentionPeriod: value}))}
+                    >
                     <SelectTrigger className="bg-dark-bg border-dark-border text-white">
                       <SelectValue />
                     </SelectTrigger>
@@ -352,12 +415,15 @@ export default function SettingsPage() {
 
                 <div className="space-y-2">
                   <Label className="text-white">Auto Sync Frequency</Label>
-                  <Select defaultValue="hourly">
+                    <Select
+                      value={dataManagementSettings.autoSyncFrequency}
+                      onValueChange={(value) => setDataManagementSettings(prev => ({...prev, autoSyncFrequency: value}))}
+                    >
                     <SelectTrigger className="bg-dark-bg border-dark-border text-white">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent className="bg-dark-card border-dark-border">
-                      <SelectItem value="realtime">Real-time</SelectItem>
+                        <SelectItem value="realtime">Real-time (if available)</SelectItem>
                       <SelectItem value="hourly">Every Hour</SelectItem>
                       <SelectItem value="daily">Daily</SelectItem>
                       <SelectItem value="manual">Manual Only</SelectItem>
@@ -367,19 +433,30 @@ export default function SettingsPage() {
 
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5">
-                    <Label className="text-white">Cache Data Locally</Label>
+                      <Label htmlFor="cacheLocallySwitch" className="text-white">Cache Data Locally</Label>
                     <p className="text-sm text-gray-400">Store data locally for faster loading</p>
                   </div>
-                  <Switch defaultChecked />
+                    <Switch
+                      id="cacheLocallySwitch"
+                      checked={dataManagementSettings.cacheLocally}
+                      onCheckedChange={(checked) => setDataManagementSettings(prev => ({...prev, cacheLocally: checked}))}
+                    />
                 </div>
-
-                <div className="pt-4 border-t border-dark-border">
+                  <div className="pt-4 border-t border-dark-border flex justify-between items-center">
                   <Button
                     variant="outline"
                     className="border-neon-pink/50 text-neon-pink hover:bg-neon-pink/10"
                     onClick={handleClearCache}
                   >
-                    Clear All Cache
+                      Clear All Client Cache
+                    </Button>
+                    <Button
+                      onClick={handleSavePreferences}
+                      disabled={isSavingPreferences || isPageLoading}
+                      className="bg-neon-pink/80 hover:bg-neon-pink/70 text-white"
+                    >
+                       {isSavingPreferences ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                       Save Data Settings
                   </Button>
                 </div>
               </CardContent>

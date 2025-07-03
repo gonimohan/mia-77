@@ -219,9 +219,9 @@ export default function DashboardPage() {
 
           return {
             title: kpi.metric_name || "Untitled KPI",
-            value: parseFloat(kpi.metric_value).toLocaleString() || "0",
+            value: parseFloat(kpi.metric_value).toLocaleString(undefined, { maximumFractionDigits: 1, minimumFractionDigits: (parseFloat(kpi.metric_value) % 1 !== 0) ? 1:0 }) || "0",
             unit: kpi.metric_unit || "",
-            change: parseFloat(kpi.change_percentage) || 0,
+            change: parseFloat(kpi.change_percentage) || 0, // This is still 0 from backend for now
             icon: assignedIcon,
             color: assignedColor as "blue" | "green" | "pink" | "purple" | "orange", // Type assertion
           };
@@ -245,9 +245,11 @@ export default function DashboardPage() {
 
   const fetchChartData = async () => {
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL || 'http://localhost:8000'}/competitors`);
+      // Calls the Next.js API route, which then calls the Python backend with auth
+      const response = await fetch(`/api/competitors`);
       if (!response.ok) {
-        throw new Error(`Failed to fetch competitor data: ${response.status} ${response.statusText}`);
+        const errorData = await response.json().catch(() => ({ detail: `Failed to fetch competitor data: ${response.status} ${response.statusText}` }));
+        throw new Error(errorData.detail || `Failed to fetch competitor data: ${response.status} ${response.statusText}`);
       }
       const responseData = await response.json();
       const competitorList = responseData.data || [];
@@ -282,9 +284,11 @@ export default function DashboardPage() {
 
   const fetchTrendsApiData = async () => {
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL || 'http://localhost:8000'}/trends`);
+      // Calls the Next.js API route, which then calls the Python backend with auth
+      const response = await fetch(`/api/trends`);
       if (!response.ok) {
-        throw new Error(`Failed to fetch trends data: ${response.status} ${response.statusText}`);
+        const errorData = await response.json().catch(() => ({ detail: `Failed to fetch trends data: ${response.status} ${response.statusText}` }));
+        throw new Error(errorData.detail || `Failed to fetch trends data: ${response.status} ${response.statusText}`);
       }
       const responseData = await response.json();
       const trendsList = responseData.data || [];
