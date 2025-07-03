@@ -1381,6 +1381,90 @@ async def update_user_preferences(preferences: UserPreferences, user=Depends(get
         logger.error(f"Error updating preferences for user {user_id_str}: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Failed to update user preferences")
 
+# User Profile Endpoints (Added for Phase 2.4.1)
+@app.get("/api/users/me/profile", response_model=Dict[str, Any])
+async def get_user_profile(user=Depends(get_current_user)):
+    if not user: # get_current_user should raise HTTPException if no valid user
+        logger.error("get_user_profile: Unlikely scenario - user is None after Depends(get_current_user).")
+        raise HTTPException(status_code=401, detail="Not authenticated or user data unavailable.")
+
+    # Safely access user_metadata and its properties
+    user_metadata = user.user_metadata if hasattr(user, 'user_metadata') else {}
+
+    profile_data = {
+        "id": str(user.id),
+        "email": user.email,
+        "full_name": user_metadata.get("full_name"),
+        "avatar_url": user_metadata.get("avatar_url"),
+        "created_at": user.created_at.isoformat() if hasattr(user, 'created_at') and user.created_at else None,
+        "last_sign_in_at": user.last_sign_in_at.isoformat() if hasattr(user, 'last_sign_in_at') and user.last_sign_in_at else None,
+        "onboarding_complete": user_metadata.get("onboarding_complete", False), # Default to False if not set
+        "dashboard_widgets": user_metadata.get("dashboard_widgets", []) # Default to empty list
+    }
+    return profile_data
+
+@app.put("/api/users/me/profile", response_model=Dict[str, Any])
+async def update_user_profile(profile_update: UserProfileUpdateRequest, user=Depends(get_current_user)):
+    if not supabase:
+        logger.error("update_user_profile: Supabase client not available.")
+        raise HTTPException(status_code=500, detail="Service misconfiguration: Auth service unavailable.")
+    if not user: # Should be caught by Depends(get_current_user)
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+
+    user_id_str = str(user.id)
+    metadata_to_update = {} # Only include fields that are actually being changed
+
+    if profile_update.full_name is not None:
+        metadata_to_update["full_name"] = profile_update.full_name
+    if profile_update.avatar_url is not None:
+        metadata_to_update["avatar_url"] = profile_update.avatar_url
+
+    if not metadata_to_update:
+        # It's better to return the current profile than an error if no actual changes are requested.
+        # Or, a 304 Not Modified, but that's more complex.
+        # For now, let's return current profile data fetched freshly.
+        logger.info(f"update_user_profile called for user {user_id_str} with no actual data fields to update.")
+        # Re-fetch to ensure we return the latest state, though user object from Depends should be fresh.
+        return await get_user_profile(user)
+
+
+    try:
+        # Merge with existing metadata to only update provided fields
+        # Ensure user.user_metadata is not None (it can be if never set)
+        existing_metadata = user.user_metadata if user.user_metadata is not None else {}
+        new_metadata_payload = {**existing_metadata, **metadata_to_update}
+
+        # Use supabase.auth.update_user for the currently authenticated user
+        update_response = await supabase.auth.update_user(
+            {"data": new_metadata_payload} # 'data' is the key for user_metadata updates
+        )
+
+        if update_response.user:
+            logger.info(f"User profile updated successfully for user_id: {user_id_str}")
+            refreshed_user = update_response.user
+            # Construct response from the refreshed_user object
+            return {
+                "id": str(refreshed_user.id),
+                "email": refreshed_user.email,
+                "full_name": refreshed_user.user_metadata.get("full_name"),
+                "avatar_url": refreshed_user.user_metadata.get("avatar_url"),
+                "onboarding_complete": refreshed_user.user_metadata.get("onboarding_complete", False),
+                "dashboard_widgets": refreshed_user.user_metadata.get("dashboard_widgets", [])
+            }
+        elif update_response.error:
+            error_detail = f"Failed to update profile: {update_response.error.message}"
+            logger.error(f"Supabase auth.update_user error for {user_id_str}: {update_response.error.message}")
+            raise HTTPException(status_code=400, detail=error_detail) # 400 for bad request often from Supabase
+        else:
+            logger.error(f"User profile update for {user_id_str} had no user object and no error in response. This is unexpected.")
+            raise HTTPException(status_code=500, detail="Failed to update profile due to an unexpected auth server response.")
+
+    except HTTPException: # Re-raise HTTPExceptions from Supabase client or our own logic
+        raise
+    except Exception as e:
+        logger.error(f"Exception during user profile update for {user_id_str}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to update profile due to an internal error: {str(e)}")
+
 
 # Application Settings Endpoints
 @app.get("/api/app-settings", response_model=List[AppSettingItem])
