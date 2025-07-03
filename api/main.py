@@ -1421,68 +1421,105 @@ async def get_kpi(timeframe: str = "latest", category: str = "all", user=Depends
         # Fetch total trends and opportunities (if cron stores them, or calculate if possible)
         # This is a simplified example; a real system might need more complex aggregation.
         # Let's assume the cron job *could* store these as cumulative totals as well.
-        total_trends_res = supabase.table("kpi_metrics") \
-            .select("metric_value") \
-            .eq("metric_name", "cumulative_total_trends") \
-            .is_("user_id", None) \
-            .order("period_end", desc=True) \
-            .limit(1) \
-            .maybe_single() \
-            .execute()
-        total_trends_identified = total_trends_res.data["metric_value"] if total_trends_res.data and total_trends_res.data.get("metric_value") is not None else 0
 
-        total_opportunities_res = supabase.table("kpi_metrics") \
-            .select("metric_value") \
-            .eq("metric_name", "cumulative_total_opportunities") \
-            .is_("user_id", None) \
-            .order("period_end", desc=True) \
-            .limit(1) \
-            .maybe_single() \
-            .execute()
-        total_opportunities_identified = total_opportunities_res.data["metric_value"] if total_opportunities_res.data and total_opportunities_res.data.get("metric_value") is not None else 0
+        # Fetch all required latest global KPI metrics in one go if possible, or separate calls
+        metric_names_to_fetch = [
+            "total_analyses_run_cumulative",
+            "total_documents_processed_cumulative",
+            "cumulative_total_trends",
+            "cumulative_total_opportunities",
+            "analyses_count_for_trend_opportunity_avg" # Fetched to use as denominator for averages
+        ]
 
-        avg_trends_per_analysis = (total_trends_identified / num_analyses) if num_analyses > 0 else 0
-        avg_ops_per_analysis = (total_opportunities_identified / num_analyses) if num_analyses > 0 else 0
+        fetched_kpis = {}
+        latest_date_recorded = None
 
-        # Constructing the response similar to the frontend's expectation
-        # The frontend KPICard expects: title, value, unit, change, icon, color
-        # We need to map our DB data to this. 'change' requires historical data.
+        for name in metric_names_to_fetch:
+            res = supabase.table("kpi_metrics") \
+                .select("metric_value, metric_unit, period_end, details") \
+                .eq("metric_name", name) \
+                .is_("user_id", None) \
+                .order("period_end", desc=True) \
+                .limit(1) \
+                .maybe_single() \
+                .execute()
+            if res.data:
+                fetched_kpis[name] = res.data
+                if latest_date_recorded is None or datetime.fromisoformat(res.data["period_end"]) > datetime.fromisoformat(latest_date_recorded):
+                    latest_date_recorded = res.data["period_end"]
+            else:
+                fetched_kpis[name] = None # Metric not found or no data
 
-        kpi_data_transformed = [
+        num_analyses = fetched_kpis.get("total_analyses_run_cumulative", {}).get("metric_value", 0)
+        num_docs_processed = fetched_kpis.get("total_documents_processed_cumulative", {}).get("metric_value", 0)
+
+        cumulative_trends = fetched_kpis.get("cumulative_total_trends", {}).get("metric_value", 0)
+        cumulative_ops = fetched_kpis.get("cumulative_total_opportunities", {}).get("metric_value", 0)
+        # Use analyses_count_for_trend_opportunity_avg as the denominator for averages
+        # This count represents analyses that actually had trend/opportunity data processed by the cron.
+        # If this specific metric isn't populated by cron, fallback to num_analyses (total completed analyses).
+        denominator_for_avg = fetched_kpis.get("analyses_count_for_trend_opportunity_avg", {}).get("metric_value", num_analyses)
+        if denominator_for_avg == 0 : # Avoid division by zero if no analyses were processed for these averages
+            denominator_for_avg = num_analyses # Fallback to total analyses, if still 0, avg will be 0.
+
+
+        avg_trends_per_analysis = (cumulative_trends / denominator_for_avg) if denominator_for_avg > 0 else 0
+        avg_ops_per_analysis = (cumulative_ops / denominator_for_avg) if denominator_for_avg > 0 else 0
+
+        # Format date_recorded to YYYY-MM-DD
+        date_recorded_str = datetime.fromisoformat(latest_date_recorded).strftime('%Y-%m-%d') if latest_date_recorded else datetime.now(dt_timezone.utc).strftime('%Y-%m-%d')
+
+        kpi_response_data = {
+            "total_analyses_run": num_analyses,
+            "documents_processed": num_docs_processed,
+            "avg_trends_identified": round(avg_trends_per_analysis, 1),
+            "avg_opportunities_identified": round(avg_ops_per_analysis, 1),
+            "date_recorded": date_recorded_str
+        }
+
+        # The frontend dashboard page expects a list of kpi objects in response.data.
+        # The new structure is a single object in response.data. This needs frontend adaptation.
+        # For now, I will adapt the backend to return the old list structure but with new data.
+        # This is temporary to avoid breaking the frontend immediately.
+        # TODO: Coordinate with frontend to accept the new simpler object structure for KPIs.
+
+        kpi_data_transformed_for_frontend_list = [
             {
-                "metric_name": "Total Analyses Run", # Title for KPICard
-                "metric_value": num_analyses,
-                "metric_unit": analyses_res.data.get("metric_unit", "count") if analyses_res.data else "count",
-                "change_percentage": 0, # Placeholder, requires previous period data
-                "details": analyses_res.data.get("details", {}) if analyses_res.data else {}
+                "metric_name": "Total Analyses Run",
+                "metric_value": kpi_response_data["total_analyses_run"],
+                "metric_unit": fetched_kpis.get("total_analyses_run_cumulative", {}).get("metric_unit", "count"),
+                "change_percentage": 0, # Placeholder
             },
             {
                 "metric_name": "Total Documents Processed",
-                "metric_value": docs_res.data["metric_value"] if docs_res.data and docs_res.data.get("metric_value") is not None else 0,
-                "metric_unit": docs_res.data.get("metric_unit", "count") if docs_res.data else "count",
+                "metric_value": kpi_response_data["documents_processed"],
+                "metric_unit": fetched_kpis.get("total_documents_processed_cumulative", {}).get("metric_unit", "count"),
                 "change_percentage": 0, # Placeholder
-                "details": docs_res.data.get("details", {}) if docs_res.data else {}
             },
             {
                 "metric_name": "Avg. Trends per Analysis",
-                "metric_value": round(avg_trends_per_analysis, 1),
+                "metric_value": kpi_response_data["avg_trends_identified"],
                 "metric_unit": "trends/analysis",
                 "change_percentage": 0, # Placeholder
-                "details": {"description": "Average number of key trends identified per completed analysis."}
             },
             {
                 "metric_name": "Avg. Opportunities per Analysis",
-                "metric_value": round(avg_ops_per_analysis, 1),
+                "metric_value": kpi_response_data["avg_opportunities_identified"],
                 "metric_unit": "ops/analysis",
                 "change_percentage": 0, # Placeholder
-                "details": {"description": "Average number of opportunities identified per completed analysis."}
             }
         ]
 
-        # The frontend dashboard page uses this structure:
-        # response.data (which is an array of kpi objects)
-        # Each kpi object has: metric_name, metric_value, metric_unit, change_percentage
-        return {"data": kpi_data_transformed, "metadata": {"timeframe": timeframe, "category": category, "last_updated": datetime.now(dt_timezone.utc).isoformat()}}
+        return {
+            "data": kpi_data_transformed_for_frontend_list, # Returning list for now
+            # "data_object": kpi_response_data, # This is the target structure
+            "metadata": {
+                "timeframe": timeframe,
+                "category": category,
+                "last_updated": datetime.now(dt_timezone.utc).isoformat(),
+                "date_recorded_for_kpis": date_recorded_str
+            }
+        }
 
     except Exception as e:
         logger.error(f"KPI GET error: {str(e)}\n{traceback.format_exc()}")
