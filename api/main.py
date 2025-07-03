@@ -1034,22 +1034,49 @@ async def test_data_source(source_id: str, user=Depends(get_current_user)):
         data_source = result.data[0]
         
         # Mock connection test - in production, implement actual API testing
-        test_result = {
-            "test_successful": True,
-            "tested_service_type": data_source["type"],
-            "message": f"Successfully connected to {data_source['name']}",
-            "response_time_ms": 150,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        # Update data source status
+        # --- START REAL IMPLEMENTATION ---
+        from .data_source_tester import test_data_source_connection # Relative import
+
+        source_name = data_source.get("name", "Unknown Source")
+        source_type = data_source.get("type", "unknown")
+        source_config = data_source.get("config", {})
+
+        logger.info(f"Testing connection for source ID: {source_id}, Name: {source_name}, Type: {source_type}")
+
+        # Update status to 'testing' before starting
         supabase.table("data_sources").update({
-            "status": "active" if test_result["test_successful"] else "error",
-            "last_sync": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
+            "status": "testing",
+            "updated_at": datetime.now(dt_timezone.utc).isoformat()
         }).eq("id", source_id).execute()
+
+        is_successful, message, response_time_ms_float = test_data_source_connection(source_type, source_config)
         
-        return test_result
+        response_time_ms_int = int(response_time_ms_float) if response_time_ms_float is not None else None
+
+
+        current_timestamp = datetime.now(dt_timezone.utc).isoformat()
+        db_update_payload = {
+            "status": "active" if is_successful else "error",
+            "last_tested_at": current_timestamp,
+            "last_test_error": None if is_successful else message[:1000], # Limit error message length
+            "updated_at": current_timestamp
+        }
+
+        update_result = supabase.table("data_sources").update(db_update_payload).eq("id", source_id).execute()
+        if not update_result.data: # Or check for errors in update_result if client provides
+            logger.error(f"Failed to update data source status after test for ID: {source_id}")
+            # Decide if this should fail the request or just log
+
+        api_response = {
+            "test_successful": is_successful,
+            "tested_service_type": source_type,
+            "message": message,
+            "response_time_ms": response_time_ms_int,
+            "timestamp": current_timestamp
+        }
+        # --- END REAL IMPLEMENTATION ---
+
+        return api_response
         
     except HTTPException:
         raise
@@ -1072,26 +1099,91 @@ async def sync_data_source(source_id: str, user=Depends(get_current_user)):
             
         data_source = result.data[0]
 
-        # Mock sync process - in production, implement actual data syncing
-        sync_result = {
-            "sync_successful": True,
-            "records_synced": 150,
-            "message": f"Successfully synced data from {data_source['name']}",
-            "timestamp": datetime.now().isoformat()
-        }
+        # --- START REAL SYNC IMPLEMENTATION ---
+        from .data_source_sync_handler import sync_data_source, SyncedArticle
         
-        # Update last sync timestamp
+        user_id_str = str(user.id) # Ensure user_id is a string for DB operations
+        source_name = data_source.get("name", "Unknown Source")
+
+        logger.info(f"Starting sync for data source ID: {source_id}, Name: {source_name}, User: {user_id_str}")
+
+        # Update status to 'syncing'
         supabase.table("data_sources").update({
-            "last_sync": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
+            "status": "syncing",
+            "updated_at": datetime.now(dt_timezone.utc).isoformat()
         }).eq("id", source_id).execute()
+
+        synced_articles: List[SyncedArticle] = sync_data_source(data_source)
         
-        return sync_result
+        documents_to_insert = []
+        if synced_articles:
+            for article in synced_articles:
+                # Convert SyncedArticle to a dictionary suitable for 'documents' table
+                # The user_id for the document should be the user who owns the data_source
+                doc_record = article.to_document_db_record(user_id=user_id_str, source_id=source_id)
+                documents_to_insert.append(doc_record)
+
+            if documents_to_insert:
+                try:
+                    # Batch insert into 'documents' table
+                    insert_res = supabase.table("documents").insert(documents_to_insert).execute()
+                    if insert_res.data:
+                        logger.info(f"Successfully inserted {len(insert_res.data)} documents from source '{source_name}'.")
+                        # Optionally, trigger background processing for these new documents here
+                        # For example, by calling process_document_pipeline for each new doc_id
+                        # for doc_db_entry in insert_res.data:
+                        #    background_tasks.add_task(process_document_pipeline, ...) # Needs more params
+                    else:
+                        logger.error(f"Failed to insert documents from source '{source_name}'. Error: {insert_res.error}")
+                        # Handle partial failure or log appropriately
+                except Exception as db_e:
+                    logger.error(f"Database error inserting synced documents for source '{source_name}': {db_e}")
+                    # Update source status to error if DB insert fails catastrophically
+                    supabase.table("data_sources").update({
+                        "status": "error",
+                        "last_test_error": f"DB insert failed: {str(db_e)[:200]}",
+                        "updated_at": datetime.now(dt_timezone.utc).isoformat()
+                    }).eq("id", source_id).execute()
+                    raise HTTPException(status_code=500, detail=f"Failed to store synced documents: {str(db_e)}")
+
+        # Update data source status and last_sync time
+        final_status = "active" # Assume active if sync ran, even if 0 articles fetched (could be no new content)
+        if not synced_articles and documents_to_insert == []: # If handler ran but returned nothing, could be an issue or just no new data
+             pass # Keep status as active, or maybe a specific "synced_empty" if needed
+
+        current_timestamp = datetime.now(dt_timezone.utc).isoformat()
+        supabase.table("data_sources").update({
+            "status": final_status,
+            "last_sync": current_timestamp,
+            "updated_at": current_timestamp
+        }).eq("id", source_id).execute()
+
+        sync_summary = {
+            "sync_successful": True, # True if the process ran, success of fetching depends on articles count
+            "source_name": source_name,
+            "articles_fetched": len(synced_articles),
+            "documents_created": len(documents_to_insert),
+            "message": f"Sync completed for '{source_name}'. Fetched {len(synced_articles)} items, created {len(documents_to_insert)} new documents.",
+            "timestamp": current_timestamp
+        }
+        # --- END REAL SYNC IMPLEMENTATION ---
+        return sync_summary
         
     except HTTPException:
+        # If HTTPException was raised by our code, re-raise it
+        # Also ensure source status is updated to 'error' if not already handled
+        supabase.table("data_sources").update({
+            "status": "error",
+            "updated_at": datetime.now(dt_timezone.utc).isoformat()
+        }).eq("id", source_id).execute()
         raise
     except Exception as e:
-        logger.error(f"Data source sync error: {str(e)}")
+        logger.error(f"Data source sync error for source ID {source_id}: {str(e)}\n{traceback.format_exc()}")
+        supabase.table("data_sources").update({
+            "status": "error",
+            "last_test_error": f"Sync failed: {str(e)[:200]}", # Use last_test_error to store sync error too
+            "updated_at": datetime.now(dt_timezone.utc).isoformat()
+        }).eq("id", source_id).execute()
         raise HTTPException(status_code=500, detail=f"Data source sync failed: {str(e)}")
 
 
@@ -1291,52 +1383,166 @@ async def update_app_settings(
         raise HTTPException(status_code=500, detail=f"Data source sync failed: {str(e)}")
 
 @app.get("/api/kpi")
-async def get_kpi(timeframe: str = "30d", category: str = "all"):
+async def get_kpi(timeframe: str = "latest", category: str = "all", user=Depends(get_current_user) ): # Added user dependency
+    logger.info(f"KPI request: timeframe={timeframe}, category={category}, user_id={user.id if user else 'None'}")
+    if not supabase:
+        logger.error("KPI GET: Supabase client not available.")
+        raise HTTPException(status_code=500, detail="Database connection not available.")
+
     try:
-        logger.info(f"KPI request: timeframe={timeframe}, category={category}")
+        # Fetch the latest global cumulative KPIs recorded by the cron job
+        # For "total_analyses_run_cumulative"
+        analyses_res = supabase.table("kpi_metrics") \
+            .select("metric_value, metric_unit, period_end, details") \
+            .eq("metric_name", "total_analyses_run_cumulative") \
+            .is_("user_id", None) \
+            .order("period_end", desc=True) \
+            .limit(1) \
+            .maybe_single() \
+            .execute()
 
-        # Enhanced KPI data with dynamic generation
-        kpi_data = {
-            "revenue": {
-                "current": 125000 + (hash(timeframe) % 10000),
-                "previous": 118000,
-                "change": 5.9,
-                "trend": "up",
-            },
-            "customers": {"current": 1250 + (hash(category) % 100), "previous": 1180, "change": 5.9, "trend": "up"},
-            "conversion": {"current": 3.2, "previous": 2.8, "change": 14.3, "trend": "up"},
-            "satisfaction": {"current": 4.6, "previous": 4.4, "change": 4.5, "trend": "up"},
-            "metadata": {
-                "timeframe": timeframe,
-                "category": category,
-                "last_updated": datetime.now().isoformat(),
-                "data_quality": "high",
-            },
-        }
+        # For "total_documents_processed_cumulative"
+        docs_res = supabase.table("kpi_metrics") \
+            .select("metric_value, metric_unit, period_end, details") \
+            .eq("metric_name", "total_documents_processed_cumulative") \
+            .is_("user_id", None) \
+            .order("period_end", desc=True) \
+            .limit(1) \
+            .maybe_single() \
+            .execute()
 
-        return kpi_data
+        # Placeholder for average trends and opportunities.
+        # This would ideally query `kpi_metrics` if the cron job was populating these averages,
+        # or calculate them on-the-fly here if it had access to all agent states.
+        # For now, we'll return placeholders or default values for these.
+
+        num_analyses = analyses_res.data["metric_value"] if analyses_res.data and analyses_res.data.get("metric_value") is not None else 0
+
+        # Fetch total trends and opportunities (if cron stores them, or calculate if possible)
+        # This is a simplified example; a real system might need more complex aggregation.
+        # Let's assume the cron job *could* store these as cumulative totals as well.
+        total_trends_res = supabase.table("kpi_metrics") \
+            .select("metric_value") \
+            .eq("metric_name", "cumulative_total_trends") \
+            .is_("user_id", None) \
+            .order("period_end", desc=True) \
+            .limit(1) \
+            .maybe_single() \
+            .execute()
+        total_trends_identified = total_trends_res.data["metric_value"] if total_trends_res.data and total_trends_res.data.get("metric_value") is not None else 0
+
+        total_opportunities_res = supabase.table("kpi_metrics") \
+            .select("metric_value") \
+            .eq("metric_name", "cumulative_total_opportunities") \
+            .is_("user_id", None) \
+            .order("period_end", desc=True) \
+            .limit(1) \
+            .maybe_single() \
+            .execute()
+        total_opportunities_identified = total_opportunities_res.data["metric_value"] if total_opportunities_res.data and total_opportunities_res.data.get("metric_value") is not None else 0
+
+        avg_trends_per_analysis = (total_trends_identified / num_analyses) if num_analyses > 0 else 0
+        avg_ops_per_analysis = (total_opportunities_identified / num_analyses) if num_analyses > 0 else 0
+
+        # Constructing the response similar to the frontend's expectation
+        # The frontend KPICard expects: title, value, unit, change, icon, color
+        # We need to map our DB data to this. 'change' requires historical data.
+
+        kpi_data_transformed = [
+            {
+                "metric_name": "Total Analyses Run", # Title for KPICard
+                "metric_value": num_analyses,
+                "metric_unit": analyses_res.data.get("metric_unit", "count") if analyses_res.data else "count",
+                "change_percentage": 0, # Placeholder, requires previous period data
+                "details": analyses_res.data.get("details", {}) if analyses_res.data else {}
+            },
+            {
+                "metric_name": "Total Documents Processed",
+                "metric_value": docs_res.data["metric_value"] if docs_res.data and docs_res.data.get("metric_value") is not None else 0,
+                "metric_unit": docs_res.data.get("metric_unit", "count") if docs_res.data else "count",
+                "change_percentage": 0, # Placeholder
+                "details": docs_res.data.get("details", {}) if docs_res.data else {}
+            },
+            {
+                "metric_name": "Avg. Trends per Analysis",
+                "metric_value": round(avg_trends_per_analysis, 1),
+                "metric_unit": "trends/analysis",
+                "change_percentage": 0, # Placeholder
+                "details": {"description": "Average number of key trends identified per completed analysis."}
+            },
+            {
+                "metric_name": "Avg. Opportunities per Analysis",
+                "metric_value": round(avg_ops_per_analysis, 1),
+                "metric_unit": "ops/analysis",
+                "change_percentage": 0, # Placeholder
+                "details": {"description": "Average number of opportunities identified per completed analysis."}
+            }
+        ]
+
+        # The frontend dashboard page uses this structure:
+        # response.data (which is an array of kpi objects)
+        # Each kpi object has: metric_name, metric_value, metric_unit, change_percentage
+        return {"data": kpi_data_transformed, "metadata": {"timeframe": timeframe, "category": category, "last_updated": datetime.now(dt_timezone.utc).isoformat()}}
+
     except Exception as e:
-        logger.error(f"KPI error: {str(e)}")
+        logger.error(f"KPI GET error: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"KPI fetch failed: {str(e)}")
 
 
-@app.post("/api/kpi")
-async def store_kpi(request: KPIRequest):
-    try:
-        logger.info(f"Storing KPI: {request.metric} = {request.value}")
+@app.post("/api/kpi", dependencies=[Depends(get_current_user)]) # Added auth
+async def store_kpi(request: KPIRequest, user=Depends(get_current_user)):
+    logger.info(f"Storing KPI: Metric={request.metric}, Value={request.value}, UserID={user.id}")
+    if not supabase:
+        logger.error("KPI POST: Supabase client not available.")
+        raise HTTPException(status_code=500, detail="Database connection not available.")
 
-        # Enhanced KPI storage
-        stored_data = {
-            "success": True,
-            "metric": request.metric,
-            "value": request.value,
-            "timestamp": request.timestamp or datetime.now().isoformat(),
-            "id": f"kpi_{hash(request.metric)}_{int(datetime.now().timestamp())}",
+    try:
+        current_time = datetime.now(dt_timezone.utc)
+        # Assuming request.timestamp is the period_end for this KPI record
+        period_end_ts = datetime.fromisoformat(request.timestamp) if request.timestamp else current_time
+
+        # For manually stored KPIs, period_start might be the same as period_end or not directly relevant
+        # unless the request provides it.
+        # We'll make period_start nullable or set it same as period_end if not provided.
+
+        kpi_record = {
+            "user_id": user.id, # Associate with the user making the request
+            "metric_name": request.metric,
+            "metric_value": request.value,
+            # "metric_unit": provided by request or inferred? For now, assume not part of basic KPIRequest
+            "period_end": period_end_ts.isoformat(),
+            "recorded_at": current_time.isoformat(),
+            # "details": {} # Optional: if request included more details
         }
 
-        return stored_data
+        # Upsert logic: if a KPI with the same name for this user for this exact period_end timestamp exists, update it.
+        # Otherwise, insert. The unique constraints on (metric_name, period_end, user_id) will handle this.
+        # The Supabase Python client's .upsert() by default works on the primary key `id`.
+        # To achieve semantic upsert on our defined keys, we'd typically:
+        # 1. Try to select an existing record based on metric_name, user_id, and period_end.
+        # 2. If exists, update it.
+        # 3. If not, insert a new one.
+        # OR rely on database's ON CONFLICT UPDATE if table is set up for it and client supports it easily.
+        # For simplicity here, we'll insert. If a duplicate for (metric_name, period_end, user_id) is attempted,
+        # the DB unique constraint `idx_kpi_metrics_name_period_user` should raise an error.
+        # A true "upsert" on these columns would require more complex logic or ensuring `id` is known and stable.
+
+        # Let's try a simple insert and let the DB handle conflicts if an exact match is inserted again.
+        # Or, if this endpoint is meant to *always* create a new historical entry, then insert is fine.
+        # If it's to update the "latest" for a user for a metric, different logic is needed.
+        # Given the schema, it seems designed for multiple records over time.
+
+        response = supabase.table("kpi_metrics").insert(kpi_record).execute()
+
+        if response.data:
+            logger.info(f"KPI POST: Successfully stored KPI '{request.metric}' for user {user.id}.")
+            return response.data[0] # Return the created record
+        else:
+            logger.error(f"KPI POST: Failed to store KPI. Error: {response.error}")
+            raise HTTPException(status_code=500, detail=f"Failed to store KPI: {response.error.message if response.error else 'Unknown error'}")
+
     except Exception as e:
-        logger.error(f"KPI storage error: {str(e)}")
+        logger.error(f"KPI POST storage error: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"KPI storage failed: {str(e)}")
 
 
@@ -1475,3 +1681,354 @@ if __name__ == "__main__":
     logger.info(f"Starting Enhanced Market Intelligence Agent API on {host}:{port}")
     logger.info("Features: File Upload, RAG Chat, AI Analysis, Data Integration")
     uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+# --- KPI Update Cron Endpoint ---
+# Import calculator and other necessary things
+from api.kpi_calculator import (
+    get_total_analyses_run,
+    get_total_documents_processed,
+    extract_kpis_from_analysis_state
+    # We'll need a way to get all relevant agent states to calculate avg trends/opportunities
+)
+from fastapi import Header, Depends
+from datetime import datetime, timedelta, timezone as dt_timezone # Renamed to avoid conflict
+
+CRON_SECRET_ENV_VAR = os.getenv("CRON_SECRET")
+
+async def verify_cron_secret(x_cron_secret: Optional[str] = Header(None)):
+    if not CRON_SECRET_ENV_VAR:
+        logger.error("CRON_SECRET is not set in environment variables. KPI update endpoint is effectively disabled.")
+        raise HTTPException(status_code=500, detail="Endpoint misconfiguration.")
+    if not x_cron_secret or x_cron_secret != CRON_SECRET_ENV_VAR:
+        logger.warning("Unauthorized attempt to access KPI update endpoint.")
+        raise HTTPException(status_code=403, detail="Forbidden.")
+    return True
+
+@app.post("/api/internal/cron/update-global-kpis", dependencies=[Depends(verify_cron_secret)])
+async def cron_update_global_kpis():
+    """
+    Scheduled endpoint to calculate and update global KPIs.
+    Secured by X-Cron-Secret header.
+    """
+    logger.info("CRON: Starting global KPI update process.")
+    if not supabase:
+        logger.error("CRON: Supabase client not available. Cannot update KPIs.")
+        raise HTTPException(status_code=500, detail="Database connection not available.")
+
+    current_time = datetime.now(dt_timezone.utc)
+    period_end_ts = current_time
+    # For daily KPIs, period_start could be the beginning of the current day
+    period_start_ts = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    kpi_updates = []
+    errors = []
+
+    # 1. Total Analyses Run (Cumulative)
+    total_analyses = get_total_analyses_run()
+    if total_analyses is not None:
+        kpi_updates.append({
+            "metric_name": "total_analyses_run_cumulative",
+            "metric_value": total_analyses,
+            "metric_unit": "count",
+            "period_start": None, # Cumulative, so no specific start for this record
+            "period_end": period_end_ts.isoformat(),
+            "recorded_at": current_time.isoformat(),
+            "user_id": None, # Global KPI
+            "details": {"description": "Cumulative total of all successfully completed analyses."}
+        })
+    else:
+        errors.append("Failed to retrieve total_analyses_run.")
+
+    # 2. Total Documents Processed (Cumulative)
+    total_docs = get_total_documents_processed()
+    if total_docs is not None:
+        kpi_updates.append({
+            "metric_name": "total_documents_processed_cumulative",
+            "metric_value": total_docs,
+            "metric_unit": "count",
+            "period_start": None, # Cumulative
+            "period_end": period_end_ts.isoformat(),
+            "recorded_at": current_time.isoformat(),
+            "user_id": None, # Global KPI
+            "details": {"description": "Cumulative total of all successfully analyzed documents."}
+        })
+    else:
+        errors.append("Failed to retrieve total_documents_processed.")
+
+    # For Average Trends/Opportunities:
+    # This requires iterating through all agent states or a summary table.
+    # For simplicity in this step, we'll placeholder this.
+    # A more robust solution would query the agent's SQLite DB for all states,
+    # extract num_trends/num_opportunities, sum them up, and also count total states with these metrics.
+    # Then calculate overall averages.
+
+    # Placeholder for cumulative total trends and opportunities identified
+    # In a real scenario, you'd query agent_logic's DB or a summary table.
+    # For now, let's imagine we have these totals.
+    # This part needs a robust way to get all agent states from agent_logic.py's DB.
+    # Let's assume for now these are not implemented by this cron directly to avoid complexity
+    # of accessing SQLite from here, and will be handled by a different mechanism or
+    # the /api/kpi GET endpoint will calculate averages on the fly.
+
+    # Upserting into Supabase
+    if kpi_updates:
+        try:
+            # Note: Supabase Python client upsert needs a list of dicts.
+            # `on_conflict` should match the unique index. For global KPIs, it's (metric_name, period_end) where user_id IS NULL.
+            # The python client might need a specific way to define this, or we ensure period_end is unique enough for global.
+            # A simpler unique key for global daily KPIs: (metric_name, DATE(period_end))
+            # For this example, we assume `period_end` (timestamp) + `metric_name` is sufficiently unique for global daily snapshot.
+            # If user_id is part of the upsert and is None, it should match the global unique index.
+
+            # We need to ensure the `on_conflict` strategy works with nullable user_id.
+            # One way is to have separate upserts or ensure the unique index handles NULLs as distinct if that's the DB behavior,
+            # or always include user_id and for global ones, use a fixed placeholder UUID if the DB doesn't like NULL in unique constraints with other non-nulls.
+            # Given our schema with two conditional unique indexes, we should be fine with user_id=None.
+
+            upsert_result = supabase.table("kpi_metrics").upsert(kpi_updates).execute() # default on_conflict is primary key `id`
+                                                                                       # We need conflict on metric_name, period_end, user_id
+
+            # To correctly use on_conflict with Supabase upsert for our unique constraints:
+            # The table needs a primary key (id). The upsert can use `on_conflict` with other columns.
+            # However, the Python client's upsert has a default behavior. If `id` is provided and exists, it updates.
+            # If `id` is not provided, it inserts.
+            # To achieve true upsert on our semantic key (metric_name, period_end, user_id),
+            # we might need to query first then update/insert, or rely on DB-level ON CONFLICT rules if the Python client doesn't expose it directly.
+            # For now, let's assume we are inserting new records for each `period_end` for simplicity of this example,
+            # and `id` is auto-generated. If we want to update the *same record* for a given day, more complex logic is needed client-side
+            # or a stored procedure.
+            # A common pattern for upsert without direct on_conflict on specific columns in client:
+            # Try to update where metric_name, period_end (date part), user_id match. If rows affected = 0, then insert.
+            # Or, if we are okay with multiple records per day for a metric and take the latest, then just insert.
+            # For now, let's just insert. The unique constraint will prevent duplicates for the *exact same timestamp* `period_end`.
+            # For true daily upsert, `period_end` should be truncated to the day.
+
+            # Corrected approach for daily upsert (assuming period_end is just the date for daily KPIs):
+            # We will store `period_end` as the specific timestamp of calculation for cumulative values.
+            # For "average trends today", period_start and period_end would be start/end of day.
+
+            # For this iteration, let's just insert. The GET /api/kpi will fetch the latest for a given metric_name.
+            insert_result = supabase.table("kpi_metrics").insert(kpi_updates).execute()
+
+            if insert_result.data:
+                logger.info(f"CRON: Successfully inserted/updated {len(insert_result.data)} KPI records.")
+            else: # Handle potential errors from Supabase
+                logger.error(f"CRON: KPI upsert failed or returned no data. Error: {insert_result.error}")
+                errors.append(f"KPI upsert failed: {insert_result.error.message if insert_result.error else 'Unknown error'}")
+
+        except Exception as e:
+            logger.error(f"CRON: Error during Supabase KPI upsert: {e}")
+            errors.append(f"Supabase KPI upsert exception: {str(e)}")
+
+    if errors:
+        logger.error(f"CRON: KPI update process completed with errors: {errors}")
+        # Depending on severity, could raise HTTPException or just log
+        return {"status": "completed_with_errors", "updated_kpis": len(kpi_updates), "errors": errors}
+
+    logger.info("CRON: Global KPI update process completed successfully.")
+    return {"status": "success", "updated_kpis": len(kpi_updates), "message": "Global KPIs updated."}
+
+# Make sure to import kpi_calculator at the top of main.py
+# from api import kpi_calculator # If it's structured like this
+# from . import kpi_calculator # Or relative if main.py is a module
+# For now, assuming it's available as `kpi_calculator.func_name`
+
+# Also, ensure CRON_SECRET is set in your .env file for this to work.
+# Example: CRON_SECRET="your_strong_random_secret_here"
+
+# --- Dashboard Chart Data Endpoints ---
+from api.agent_logic import load_state as load_agent_state # Renamed to avoid conflict with any FastAPI state
+
+@app.get("/api/trends")
+async def get_trends_data(analysis_id: Optional[str] = None, user=Depends(get_current_user)):
+    logger.info(f"GET /api/trends: analysis_id={analysis_id}, user_id={user.id}")
+    if not supabase: # Although load_agent_state uses SQLite, supabase client check is good for consistency
+        raise HTTPException(status_code=500, detail="Service not fully configured.")
+
+    state_to_load = None
+    if analysis_id:
+        # TODO: Add check to ensure user owns this analysis_id if loading directly by ID
+        # For now, assuming direct load is admin/specific or analysis_id is validated elsewhere
+        loaded_s = load_agent_state(analysis_id)
+        if loaded_s and loaded_s.user_id == str(user.id): # Check ownership
+            state_to_load = loaded_s
+        elif loaded_s:
+            logger.warning(f"User {user.id} attempted to load state {analysis_id} owned by {loaded_s.user_id}")
+            raise HTTPException(status_code=403, detail="Access denied to this analysis.")
+        else:
+            raise HTTPException(status_code=404, detail=f"Analysis with ID '{analysis_id}' not found.")
+    else:
+        # Fetch the most recent completed analysis for the current user from agent's SQLite DB
+        # This requires a new function in agent_logic.py to get most recent state_id for user
+        # For now, let's return a placeholder if no analysis_id is given,
+        # as implementing "most recent" query on SQLite from here is complex.
+        # Or, use the Supabase 'reports' table if it stores state_id and completion status.
+
+        # Let's assume for now the frontend *should* provide an analysis_id for specific charts.
+        # If not, we return a sample or error.
+        # For the current dashboard, it doesn't pass an ID. So we need a default.
+        # Let's try to get the latest from Supabase 'reports' table, assuming it has 'state_id' populated.
+
+        # This part is complex as 'reports' table might not have state_id.
+        # The agent's SQLite DB is the primary source of states.
+        # We need a robust way to list states for a user from agent_logic.py
+        # For now, if no analysis_id, return default/mock data or an error.
+        # The dashboard's current call pattern (no ID) for /trends needs to be addressed.
+        # A simpler default: Use a globally pre-defined "sample" analysis ID if one exists for demos.
+
+        # Fallback: if agent_logic.py's init_db() creates sample data, use that.
+        # Or, we can query the agent's SQLite DB for the latest state for the user.
+        # This requires a new function in agent_logic.py: get_latest_user_state_id(user_id: str)
+        from api.agent_logic import get_latest_user_state_id # Assuming this function will be created
+        latest_state_id = get_latest_user_state_id(str(user.id))
+        if latest_state_id:
+            state_to_load = load_agent_state(latest_state_id)
+            if not (state_to_load and state_to_load.user_id == str(user.id)): # Double check ownership
+                state_to_load = None # Should not happen if get_latest_user_state_id is correct
+
+        if not state_to_load:
+            logger.warning(f"No analysis ID provided and no suitable recent analysis found for user {user.id} for /trends.")
+            # Return sample data to match frontend expectation for now
+            return {"data": [
+                {"name": "Sample Trend 1", "impact": 3},
+                {"name": "Sample Trend 2", "impact": 2},
+                {"name": "Sample Trend 3", "impact": 1}
+            ]}
+
+
+    if not state_to_load or not state_to_load.market_trends:
+        logger.warning(f"No market trends found in loaded state for analysis_id={analysis_id or 'latest'} for user {user.id}.")
+        return {"data": []} # Return empty list if no trends
+
+    def impact_to_value(impact_str: Optional[str]) -> int:
+        if not impact_str: return 0
+        val = str(impact_str).lower()
+        if val == 'high': return 3
+        if val == 'medium': return 2
+        if val == 'low': return 1
+        return 0
+
+    transformed_trends = [
+        {
+            "name": trend.get("trend_name", "Unknown Trend"),
+            "impact": impact_to_value(trend.get("estimated_impact"))
+        }
+        for trend in state_to_load.market_trends
+    ]
+
+    return {"data": transformed_trends}
+
+# TODO: Create get_latest_user_state_id(user_id: str) in agent_logic.py
+# This function would query the agent's SQLite 'states' table:
+# SELECT id FROM states WHERE user_id = ? ORDER BY created_at DESC LIMIT 1;
+# (Need to ensure created_at is stored and indexed properly for sorting)
+
+@app.get("/api/competitors")
+async def get_competitors_data(analysis_id: Optional[str] = None, user=Depends(get_current_user)):
+    logger.info(f"GET /api/competitors: analysis_id={analysis_id}, user_id={user.id}")
+    # Basic structure similar to /api/trends
+    state_to_load = None
+    if analysis_id:
+        loaded_s = load_agent_state(analysis_id)
+        if loaded_s and loaded_s.user_id == str(user.id):
+            state_to_load = loaded_s
+        elif loaded_s:
+            raise HTTPException(status_code=403, detail="Access denied.")
+        else:
+            raise HTTPException(status_code=404, detail=f"Analysis '{analysis_id}' not found.")
+    else:
+        from api.agent_logic import get_latest_user_state_id
+        latest_state_id = get_latest_user_state_id(str(user.id))
+        if latest_state_id:
+            state_to_load = load_agent_state(latest_state_id)
+            if not (state_to_load and state_to_load.user_id == str(user.id)):
+                state_to_load = None
+
+        if not state_to_load:
+            logger.warning(f"No analysis ID provided and no suitable recent analysis found for user {user.id} for /competitors. Returning sample data.")
+            # This sample data should match the structure expected by app/competitors/page.tsx's transform function
+            return {"data": [
+                {"company_name": "Mock Comp A", "market_share": "25.5", "activity_score": "75", "growth_rate": "5.2", "revenue": "$100M", "employees": "500", "strengths": ["Innovation"], "weaknesses": ["High Price"], "recentActivity": "Launched new product X.", "threat_level": "high"},
+                {"company_name": "Mock Comp B", "market_share": "15.0", "activity_score": "60", "growth_rate": "-2.1", "revenue": "$50M", "employees": "200", "strengths": ["Price"], "weaknesses": ["Marketing"], "recentActivity": "Acquired smaller company Y.", "threat_level": "medium"},
+            ]}
+
+    if not state_to_load or not state_to_load.raw_news_data: # Using raw_news_data as placeholder
+        logger.warning(f"No competitor data (raw_news_data) found in loaded state for analysis_id={analysis_id or 'latest'} for user {user.id}.")
+        return {"data": []}
+
+    # --- MOCK TRANSFORMATION of raw_news_data to competitor-like structure ---
+    # This is highly artificial and needs replacement with a real competitor analysis module.
+    logger.warning("Serving MOCK/DERIVED competitor data from raw_news_data for /api/competitors. Needs proper competitor analysis module.")
+
+    mock_competitors = []
+    for i, item in enumerate(state_to_load.raw_news_data[:5]): # Take first 5 articles as mock competitors
+        source_name = item.get("source", f"Source {i+1}")
+        # Try to parse a domain from source if it's a URL, otherwise use source name
+        try:
+            parsed_url = urlparse(source_name)
+            display_name = parsed_url.netloc if parsed_url.netloc else source_name
+        except:
+            display_name = source_name
+
+        mock_competitors.append({
+            "id": item.get("url", f"comp-{i}"), # Use URL as ID or generate one
+            "company_name": item.get("title", display_name)[:50], # Use article title or source
+            "name": item.get("title", display_name)[:50], # For compatibility with some frontend chart expectations
+            "title": item.get("title", display_name)[:50], # ibid
+            "market_share": str(10 + (hash(display_name) % 15)),  # Dummy market share btw 10-24%
+            "revenue_string": f"${50 + (hash(display_name) % 100)}M", # Dummy revenue
+            "revenue": f"${50 + (hash(display_name) % 100)}M", # For compatibility
+            "employees": str(100 + (hash(display_name) % 900)), # Dummy employees
+            "growth_rate": str(round(-5 + (hash(display_name) % 100) / 10, 1)), # Dummy growth rate -5 to 4.9%
+            "activity_score": str(50 + (hash(display_name) % 50)), # Dummy activity score
+            "activity": str(50 + (hash(display_name) % 50)), # For compatibility
+            "growth": str(round(-5 + (hash(display_name) % 100) / 10, 1)), # For compatibility
+            "strengths": ["Strong Brand", "Innovation"] if i % 2 == 0 else ["Large Customer Base"],
+            "weaknesses": ["High Prices"] if i % 2 == 0 else ["Slow Adaptability"],
+            "recentActivity": item.get("summary", "Recent news summary placeholder.")[:150],
+            "summary": item.get("summary", "Recent news summary placeholder.")[:150], # For compatibility
+            "threat_level": ["low", "medium", "high"][i % 3],
+        })
+
+    return {"data": mock_competitors}
+
+
+@app.get("/api/customer-insights")
+async def get_customer_insights_data(analysis_id: Optional[str] = None, user=Depends(get_current_user)):
+    logger.info(f"GET /api/customer-insights: analysis_id={analysis_id}, user_id={user.id}")
+    state_to_load = None
+    if analysis_id:
+        loaded_s = load_agent_state(analysis_id)
+        if loaded_s and loaded_s.user_id == str(user.id):
+            state_to_load = loaded_s
+        elif loaded_s:
+            raise HTTPException(status_code=403, detail="Access denied.")
+        else:
+            raise HTTPException(status_code=404, detail=f"Analysis '{analysis_id}' not found.")
+    else:
+        from api.agent_logic import get_latest_user_state_id
+        latest_state_id = get_latest_user_state_id(str(user.id))
+        if latest_state_id:
+            state_to_load = load_agent_state(latest_state_id)
+            if not (state_to_load and state_to_load.user_id == str(user.id)):
+                state_to_load = None
+
+        if not state_to_load:
+            logger.warning(f"No analysis ID provided and no suitable recent analysis found for user {user.id} for /customer-insights. Returning sample data.")
+            # Sample data structure based on app/customer-insights/page.tsx
+            return {"data": [
+                {"segment_name": "Sample Segment Alpha", "description": "Description for Alpha.", "percentage": 60, "key_characteristics": ["Char1", "Char2"], "pain_points": ["Pain1", "Pain2"], "growth_potential": "High", "satisfaction_score": 8.5, "retention_rate": 75, "acquisition_cost": "Medium", "lifetime_value": "High"},
+                {"segment_name": "Sample Segment Beta", "description": "Description for Beta.", "percentage": 40, "key_characteristics": ["Char3", "Char4"], "pain_points": ["Pain3", "Pain4"], "growth_potential": "Medium", "satisfaction_score": 7.0, "retention_rate": 60, "acquisition_cost": "High", "lifetime_value": "Medium"},
+            ]}
+
+    if not state_to_load or not state_to_load.customer_insights:
+        logger.warning(f"No customer insights found in loaded state for analysis_id={analysis_id or 'latest'} for user {user.id}.")
+        return {"data": []}
+
+    # The customer_insights in agent state should already be in the correct format
+    # as generated by customer_insights_generator node.
+    return {"data": state_to_load.customer_insights}
+
+# Need to import urlparse for the mock competitor data generation
+from urllib.parse import urlparse

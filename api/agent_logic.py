@@ -277,6 +277,9 @@ class MarketIntelligenceState(BaseModel):
     chart_paths: List[str] = Field(default_factory=list)
     download_files: Dict[str, str] = Field(default_factory=dict)
     uploaded_files_content: List[Dict[str, Any]] = Field(default_factory=list)
+    num_trends: Optional[int] = None
+    num_opportunities: Optional[int] = None
+    uploaded_document_ids: Optional[List[str]] = None # For passing IDs of pre-uploaded docs
 
     @field_validator("market_domain")
     @classmethod
@@ -924,6 +927,43 @@ async def market_data_collector(current_state: MarketIntelligenceState, uploaded
     except Exception as e_mkdir_report:
         error_logger.critical(f"CRITICAL: Failed to create report directory '{run_report_dir}': {e_mkdir_report}")
         raise IOError(f"Cannot create report directory '{run_report_dir}': {e_mkdir_report}")
+
+    all_fetched_data = [] # Initialize here
+
+    # Process uploaded document IDs first
+    if current_state.uploaded_document_ids and current_state.user_id:
+        logger.info(f"Market Data Collector: Processing {len(current_state.uploaded_document_ids)} uploaded document IDs.")
+        supabase = get_supabase_client() # Get Supabase client instance
+        if supabase:
+            for doc_id in current_state.uploaded_document_ids:
+                try:
+                    # Fetch only necessary fields, ensure uploader_id matches for security if needed,
+                    # but agent_logic typically runs with service_role_key so it has broad access.
+                    # Assuming user_id in current_state is the owner.
+                    doc_response = supabase.table("documents").select("original_filename, text, file_extension").eq("id", doc_id).eq("uploader_id", current_state.user_id).maybe_single().execute()
+
+                    if doc_response.data and doc_response.data.get("text"):
+                        doc_content = doc_response.data["text"]
+                        doc_title = doc_response.data.get("original_filename", f"Document {doc_id}")
+                        # Create a SyncedArticle-like structure or directly a dict for all_fetched_data
+                        all_fetched_data.append({
+                            "source": f"document_id://{doc_id}", # Indicate source is an uploaded document
+                            "title": doc_title,
+                            "summary": doc_content[:500] + "..." if doc_content and len(doc_content) > 500 else doc_content, # Basic summary
+                            "full_content": doc_content,
+                            "url": f"app://document/{doc_id}" # Placeholder URL scheme
+                        })
+                        logger.info(f"Market Data Collector: Added content from uploaded document ID {doc_id}.")
+                    else:
+                        logger.warning(f"Market Data Collector: Document ID {doc_id} not found or text is empty for user {current_state.user_id}.")
+                except Exception as e_fetch_doc:
+                    error_logger.error(f"Market Data Collector: Failed to fetch/process uploaded document ID {doc_id}: {e_fetch_doc}")
+        else:
+            logger.warning("Market Data Collector: Supabase client not available. Skipping processing of uploaded_document_ids.")
+
+    current_state.uploaded_files_content = [data for data in all_fetched_data if data["source"].startswith("document_id://")]
+
+
     json_file_path = os.path.join(run_report_dir, f"{current_state.market_domain.lower().replace(' ', '_')}_data_sources.json")
     csv_file_path = os.path.join(run_report_dir, f"{current_state.market_domain.lower().replace(' ', '_')}_data_sources.csv")
     news_search_query = f"{current_state.query} {current_state.market_domain} news trends developments emerging technologies"
@@ -1085,11 +1125,17 @@ async def trend_analyzer(current_state: MarketIntelligenceState) -> Dict[str, An
         logger.info(f"Trend Analyzer: Invoking LLM for state {current_state.state_id}. News items: {len(limited_news_data)}, Competitor items: {len(limited_competitor_data)}")
         llm_output_string = await chain.ainvoke({"market_domain": current_state.market_domain, "query": current_state.query or "general", "input_json_data": json.dumps(input_data_for_llm)})
         parsed_trends = llm_json_parser_robust(llm_output_string, default_return_val=default_trends_list)
-        if not isinstance(parsed_trends, list) or not all(isinstance(t, dict) for t in parsed_trends):
-            logger.warning(f"Trend Analyzer: Parsed trends not a list of dicts for state {current_state.state_id}. Using default. Output: {llm_output_string[:200]}")
-            parsed_trends = default_trends_list
-        logger.info(f"Trend Analyzer: Identified {len(parsed_trends)} trends for state {current_state.state_id}.")
-        current_state.market_trends = parsed_trends
+
+        # Validate structure: list of dicts
+        if isinstance(parsed_trends, list) and all(isinstance(t, dict) for t in parsed_trends):
+            current_state.market_trends = parsed_trends
+            current_state.num_trends = len(parsed_trends)
+            logger.info(f"Trend Analyzer: Successfully parsed and stored {current_state.num_trends} trends for state {current_state.state_id}.")
+        else:
+            logger.warning(f"Trend Analyzer: Parsed trends not a list of dicts for state {current_state.state_id}. Using default. LLM Output: {llm_output_string[:200]}")
+            current_state.market_trends = default_trends_list
+            current_state.num_trends = len(default_trends_list) # Or 0 if default is empty and means "no trends found"
+
         if current_state.report_dir:
             trends_json_path = os.path.join(current_state.report_dir, "market_trends.json")
             try:
@@ -1137,10 +1183,17 @@ async def opportunity_identifier(current_state: MarketIntelligenceState) -> Dict
         })
         
         parsed_ops = llm_json_parser_robust(llm_output, default_return_val=default_ops)
-        if not isinstance(parsed_ops, list) or not all(isinstance(op, dict) for op in parsed_ops):
-            logger.warning(f"Opportunity Identifier: Parsed opportunities not a list of dicts for state {current_state.state_id}. Using default. Output: {llm_output[:200]}")
-            parsed_ops = default_ops
-        current_state.opportunities = parsed_ops
+
+        # Validate structure: list of dicts
+        if isinstance(parsed_ops, list) and all(isinstance(op, dict) for op in parsed_ops):
+            current_state.opportunities = parsed_ops
+            current_state.num_opportunities = len(parsed_ops)
+            logger.info(f"Opportunity Identifier: Successfully parsed and stored {current_state.num_opportunities} opportunities for state {current_state.state_id}.")
+        else:
+            logger.warning(f"Opportunity Identifier: Parsed opportunities not a list of dicts for state {current_state.state_id}. Using default. LLM Output: {llm_output[:200]}")
+            current_state.opportunities = default_ops
+            current_state.num_opportunities = len(default_ops) # Or 0 if default is empty
+
         if current_state.report_dir:
             opportunities_json_path = os.path.join(current_state.report_dir, "opportunities.json")
             try:
@@ -1685,19 +1738,23 @@ class MarketIntelligenceAgent:
 
 
 async def run_market_intelligence_agent(
-    query_str: str, market_domain_str: str, question_str: Optional[str] = None, user_id: Optional[str] = None
+    query_str: str, market_domain_str: str, question_str: Optional[str] = None, user_id: Optional[str] = None, uploaded_document_ids: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     logger.info(
-        f"Agent Run: Starting with Query='{query_str}', Domain='{market_domain_str}', Question='{question_str or 'N/A'}', UserID='{user_id or 'N/A'}'"
+        f"Agent Run: Starting with Query='{query_str}', Domain='{market_domain_str}', Question='{question_str or 'N/A'}', UserID='{user_id or 'N/A'}', UploadedDocIDs='{uploaded_document_ids or 'None'}'"
     )
     error_state_id = str(uuid4())
     error_report_dir_path = None
     error_report_file_path = None
     try:
         initial_state = MarketIntelligenceState(
-            market_domain=market_domain_str, query=query_str, question=question_str, user_id=user_id
+            market_domain=market_domain_str,
+            query=query_str,
+            question=question_str,
+            user_id=user_id,
+            uploaded_document_ids=uploaded_document_ids
         )
-        logger.info(f"Agent Run: Initial state created with ID: {initial_state.state_id} for UserID: {user_id}")
+        logger.info(f"Agent Run: Initial state created with ID: {initial_state.state_id} for UserID: {user_id}, includes {len(uploaded_document_ids or [])} uploaded doc IDs.")
         workflow = StateGraph(dict)
         workflow.add_node("market_data_collector", market_data_collector)
         workflow.add_node("trend_analyzer", trend_analyzer)
@@ -1869,6 +1926,38 @@ if __name__ == "__main__":
     ))
 
     print("--- Agent CLI Run Summary ---")
+def get_latest_user_state_id(user_id: str) -> Optional[str]:
+    """
+    Retrieves the ID of the most recent analysis state for a given user
+    from the agent's local SQLite database.
+    Assumes 'created_at' column exists and stores ISO8601 timestamps for correct sorting.
+    """
+    db_path = get_db_path()
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        # Ensure created_at is being stored in a sortable format (ISO8601 string is fine with DATETIME())
+        cursor.execute(
+            "SELECT id FROM states WHERE user_id = ? ORDER BY DATETIME(created_at) DESC LIMIT 1",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            logger.info(f"Found latest state ID '{row[0]}' for user_id '{user_id}'.")
+            return row[0]
+        else:
+            logger.info(f"No states found for user_id '{user_id}'.")
+            return None
+    except sqlite3.Error as e:
+        error_logger.error(f"SQLite error fetching latest state ID for user {user_id}: {e}")
+        return None
+    except Exception as e: # Catch any other unexpected errors
+        error_logger.error(f"Unexpected error fetching latest state ID for user {user_id}: {e}\n{traceback.format_exc()}")
+        return None
+    finally:
+        if conn:
+            conn.close()
     print(f"Success: {cli_run_output.get('success')}")
     print(f"State ID: {cli_run_output.get('state_id')}")
     print(f"Report Directory (relative to /tmp or api_python/reports1): {cli_run_output.get('report_dir_relative')}")
