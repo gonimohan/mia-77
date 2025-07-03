@@ -35,14 +35,17 @@ export default function CustomerInsightsPage() {
   const fetchCustomerInsightsData = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL || 'http://localhost:8000'}/customer-insights`);
+      // Calls the Next.js API route, which then calls the Python backend with auth
+      const response = await fetch(`/api/customer-insights`);
       if (!response.ok) {
-        console.error(`Failed to fetch customer insights: ${response.statusText}`);
+        const errorData = await response.json().catch(() => ({ detail: `Failed to fetch customer insights: ${response.status} ${response.statusText}` }));
+        console.error(`Failed to fetch customer insights: ${errorData.detail || response.statusText}`);
         setInsights([]);
-        return;
+        // toast is already called in the catch block
+        throw new Error(errorData.detail || `Failed to fetch customer insights: ${response.status} ${response.statusText}`);
       }
       const responseData = await response.json();
-      const rawData = responseData.data || [];
+      const rawData = responseData.data || []; // Python endpoint wraps data in a "data" key
 
       const transformedInsights: CustomerSegment[] = rawData.map((segment: any) => ({
         segment_name: segment.segment_name || "Unnamed Segment",

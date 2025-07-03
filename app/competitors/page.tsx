@@ -47,14 +47,17 @@ export default function CompetitorsPage() {
   const fetchCompetitorData = async () => {
     setIsLoading(true);
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_PYTHON_AGENT_API_BASE_URL || 'http://localhost:8000'}/competitors`);
+      // Calls the Next.js API route, which then calls the Python backend with auth
+      const response = await fetch(`/api/competitors`);
       if (!response.ok) {
-        console.error(`Failed to fetch competitor data: ${response.status} ${response.statusText}`);
-        setCompetitors([]); // Set to empty on error
-        return;
+        const errorData = await response.json().catch(() => ({ detail: `Failed to fetch competitor data: ${response.status} ${response.statusText}` }));
+        console.error(`Failed to fetch competitor data: ${errorData.detail || response.statusText}`);
+        setCompetitors([]);
+         // toast is already called in the catch block
+        throw new Error(errorData.detail || `Failed to fetch competitor data: ${response.status} ${response.statusText}`);
       }
       const responseData = await response.json();
-      const rawComps = responseData.data || [];
+      const rawComps = responseData.data || []; // Python endpoint wraps data in a "data" key
 
       const transformedData: Competitor[] = rawComps.map((item: any, index: number) => {
         let determinedThreat: "low" | "medium" | "high" = "medium";
