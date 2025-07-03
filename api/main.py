@@ -352,8 +352,10 @@ async def shutdown_db_client():
 
 
 # Import real agent functions
-import agent_logic  # Use `.` for relative import in a package
-
+from api import agent_logic # Adjusted for clarity if main.py is run from outside api dir sometimes
+                            # but for uvicorn from api dir, `import agent_logic` or `from . import agent_logic` is fine.
+                            # Let's stick to `from api import agent_logic` for robustness in various run contexts.
+                            # Or, more standardly for a package: `from . import agent_logic`
 
 # Global error handler
 @app.exception_handler(Exception)
@@ -393,51 +395,137 @@ async def health_check():
 @app.post("/api/analyze")
 async def analyze(analysis_request: AnalysisRequest, user=Depends(get_current_user)):
     try:
-        logger.info(f"Analysis request: {request.query} for domain: {request.market_domain}")
+        logger.info(f"Analysis request received: Query='{analysis_request.query}', Domain='{analysis_request.market_domain}', UserID='{user.id}', FileIDs='{analysis_request.uploaded_file_ids}'")
 
-        # Generate AI-powered insights
-        insights = await ai_agent.generate_insights(
-            request.query,
-            {"market_domain": request.market_domain, "question": request.question}
+        # Call the actual agent logic
+        # Ensure agent_logic is imported correctly at the top of the file
+        # e.g., from . import agent_logic or from api import agent_logic
+        agent_result = await agent_logic.run_market_intelligence_agent(
+            query_str=analysis_request.query,
+            market_domain_str=analysis_request.market_domain,
+            question_str=analysis_request.question,
+            user_id=str(user.id),
+            uploaded_document_ids=analysis_request.uploaded_file_ids
         )
-        
-        # Store analysis in database
-        if supabase:
-            try:
-                analysis_record = {
-                    "user_id": user.id,
-                    "query": request.query,
-                    "market_domain": request.market_domain,
-                    "question": request.question,
-                    "insights": insights,
-                    "created_at": datetime.now().isoformat()
-                }
-                
-                result = supabase.table("market_analyses").insert(analysis_record).execute()
-                logger.info(f"Analysis stored with ID: {result.data[0]['id'] if result.data else 'unknown'}")
-            except Exception as db_error:
-                logger.warning(f"Failed to store analysis in database: {db_error}")
-                # Continue without failing the request
 
-        analysis_result = {
-            "query": request.query,
-            "market_domain": request.market_domain,
-            "question": request.question,
-            "analysis": insights.get("insights", []),
-            "recommendations": insights.get("recommendations", []),
-            "confidence_score": insights.get("confidence_score", 0.87),
-            "timestamp": datetime.now().isoformat(),
-            "metadata": {
-                "processing_time_ms": 1250,
-                "data_sources": insights.get("data_sources", []),
-                "version": "1.0.0"
+        report_status = "completed" if agent_result.get("success") else "failed"
+        report_file_path = None
+        if agent_result.get("success") and agent_result.get("report_dir_relative") and agent_result.get("report_filename"):
+            # Construct a conceptual path. Actual storage/retrieval might differ.
+            report_file_path = f"{agent_result.get('report_dir_relative')}/{agent_result.get('report_filename')}"
+        
+        report_title = f"Analysis for '{analysis_request.query}' in '{analysis_request.market_domain}'"
+
+        # Store a reference in the 'reports' table
+        if supabase:
+            report_record = {
+                "user_id": str(user.id),
+                "title": report_title[:255], # Ensure title fits in VARCHAR(255)
+                "market_domain": analysis_request.market_domain,
+                "query_text": analysis_request.query,
+                "status": report_status,
+                "report_data": { # Store key results or references
+                    "state_id": agent_result.get("state_id"),
+                    "agent_query_response": agent_result.get("query_response"),
+                    "error_message": agent_result.get("error") if not agent_result.get("success") else None,
+                    "chart_filenames": agent_result.get("chart_filenames"),
+                    "download_files": agent_result.get("download_files")
+                },
+                "file_path": report_file_path, # Path to the main markdown report
+                # created_at and updated_at will be set by DB defaults
             }
+            try:
+                insert_op = supabase.table("reports").insert(report_record).execute()
+                if insert_op.data:
+                    logger.info(f"Report record stored in Supabase 'reports' table with ID: {insert_op.data[0]['id']}")
+                    # Return the agent_result which includes state_id etc.
+                    # The frontend might use state_id to later fetch report details or files.
+                    return {
+                        "success": agent_result.get("success"),
+                        "message": "Analysis processing initiated." if agent_result.get("success") else "Analysis processing failed.",
+                        "state_id": agent_result.get("state_id"),
+                        "report_db_id": insert_op.data[0]['id'], # ID from 'reports' table
+                        "details": agent_result # Full agent result for client if needed
+                    }
+                else:
+                    logger.error(f"Failed to store report record in Supabase 'reports' table: {insert_op.error.message if insert_op.error else 'Unknown error'}")
+                    # Even if DB store fails, the agent might have run. Return agent status.
+                    # Or raise an error if this DB store is critical for the flow.
+                    # For now, log error and proceed with agent result.
+                    # Fall through to return agent_result directly but log the DB error.
+            except Exception as db_error:
+                logger.error(f"Exception storing report record to Supabase 'reports': {db_error}\n{traceback.format_exc()}")
+                # Fall through to return agent_result, but with a warning about DB persistence.
+
+        # Fallback return if Supabase interaction failed but agent ran
+        return {
+            "success": agent_result.get("success"),
+            "message": "Analysis processing completed but report metadata might not have been saved.",
+            "state_id": agent_result.get("state_id"),
+            "details": agent_result
         }
 
-        return analysis_result
     except Exception as e:
-        logger.error(f"Analysis error in /api/analyze: {str(e)}\n{traceback.format_exc()}")
+        logger.error(f"Error in /api/analyze endpoint: {str(e)}\n{traceback.format_exc()}")
+        # Attempt to store a 'failed' record in reports table even if agent run fails early
+        if supabase and user and analysis_request: # Ensure we have necessary info
+             try:
+                report_title_on_error = f"Failed Analysis for '{analysis_request.query}'"
+                supabase.table("reports").insert({
+                    "user_id": str(user.id),
+                    "title": report_title_on_error[:255],
+                    "market_domain": analysis_request.market_domain,
+                    "query_text": analysis_request.query,
+                    "status": "failed",
+                    "report_data": {"error_message": str(e)[:1000]} # Store snippet of error
+                }).execute()
+             except Exception as db_e_on_fail:
+                 logger.error(f"Failed to store error report: {db_e_on_fail}")
+
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+
+@app.get("/api/reports", response_model=List[Dict[str, Any]])
+async def list_reports_for_user(user=Depends(get_current_user), limit: int = 50, offset: int = 0):
+    """
+    Lists all analysis reports for the authenticated user from the 'reports' table.
+    """
+    logger.info(f"GET /api/reports: UserID='{user.id}', Limit={limit}, Offset={offset}")
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Database connection not available.")
+
+    try:
+        # Select specific fields to return for the list view.
+        # Include 'id' (report_db_id), 'title', 'market_domain', 'status', 'created_at'.
+        # Also extract 'state_id' from 'report_data' JSONB field.
+        # Note: Accessing JSONB fields in select might vary slightly based on Supabase/Postgres version or client library features.
+        # The `->>` operator casts JSONB value to text.
+        reports_response = supabase.table("reports") \
+            .select("id, title, market_domain, status, created_at, report_data->>state_id") \
+            .eq("user_id", str(user.id)) \
+            .order("created_at", desc=True) \
+            .limit(limit) \
+            .offset(offset) \
+            .execute()
+
+        if reports_response.data:
+            # Rename 'report_data->>state_id' to 'state_id' in the response if needed by frontend,
+            # or ensure frontend can handle the default naming if direct.
+            # For now, let's assume the default naming is acceptable or frontend adapts.
+            # If a direct rename is needed:
+            # formatted_reports = []
+            # for report in reports_response.data:
+            #     new_report = {**report}
+            #     new_report["state_id"] = new_report.pop("report_data->>state_id", None) # Example rename
+            #     formatted_reports.append(new_report)
+            # return formatted_reports
+            return reports_response.data
+        else:
+            return [] # Return empty list if no reports found or error in data
+
+    except Exception as e:
+        logger.error(f"Error listing reports for user {user.id}: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to list reports: {str(e)}")
 
 
 @app.post("/api/chat")
@@ -2069,3 +2157,60 @@ async def get_customer_insights_data(analysis_id: Optional[str] = None, user=Dep
 
 # Need to import urlparse for the mock competitor data generation
 from urllib.parse import urlparse
+from fastapi.responses import FileResponse # For serving files
+
+# Agent State related endpoints (for downloads page)
+@app.get("/api/analysis-states/{state_id}/downloads-info") # Renamed slightly for clarity from just /downloads
+async def get_analysis_state_downloads_info(state_id: str, user=Depends(get_current_user)):
+    logger.info(f"GET /api/analysis-states/{state_id}/downloads-info: UserID='{user.id}'")
+    if not state_id:
+        raise HTTPException(status_code=400, detail="State ID is required.")
+
+    try:
+        # Assuming get_state_download_info from agent_logic handles user_id check internally for ownership
+        # or returns None if state_id doesn't belong to user or doesn't exist.
+        download_info = agent_logic.get_state_download_info(state_id=state_id, user_id=str(user.id))
+        if not download_info:
+            # This could be 404 if state not found, or 403 if not owned.
+            # get_state_download_info logs details, so a generic 404 is fine here.
+            raise HTTPException(status_code=404, detail="Analysis state not found or not accessible.")
+
+        return download_info # Structure should be like {"state_id": ..., "files": [{"category": ..., "filename": ...}]}
+    except HTTPException:
+        raise # Re-raise known HTTP exceptions
+    except Exception as e:
+        logger.error(f"Error getting download info for state {state_id}, user {user.id}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve download information.")
+
+@app.get("/api/analysis-states/{state_id}/download-file/{file_identifier}")
+async def download_analysis_file(state_id: str, file_identifier: str, user=Depends(get_current_user)):
+    logger.info(f"GET /api/analysis-states/{state_id}/download-file/{file_identifier}: UserID='{user.id}'")
+    if not state_id or not file_identifier:
+        raise HTTPException(status_code=400, detail="State ID and file identifier are required.")
+
+    try:
+        # get_download_file_path in agent_logic should handle ownership check and path validation
+        file_path_str = agent_logic.get_download_file_path(state_id=state_id, user_id=str(user.id), file_identifier=file_identifier)
+
+        if not file_path_str:
+            raise HTTPException(status_code=404, detail="File not found or not accessible.")
+
+        # Check if file exists, just in case get_download_file_path didn't fully validate existence (it should)
+        if not os.path.exists(file_path_str) or not os.path.isfile(file_path_str):
+            logger.error(f"File path resolved but file does not exist or is not a file: {file_path_str}")
+            raise HTTPException(status_code=404, detail="File not found on server.")
+
+        # Use original filename for download if available, otherwise use file_identifier
+        # This might require get_download_file_path to return more than just the path,
+        # or we derive it from file_identifier if it's the actual filename.
+        # For now, using file_identifier as the download name.
+        # A better approach: get_state_download_info could provide the original filename for each identifier.
+        # The `file_identifier` from the frontend IS the `filename` from `DownloadableFile` interface.
+
+        return FileResponse(path=file_path_str, filename=file_identifier, media_type='application/octet-stream')
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading file {file_identifier} for state {state_id}, user {user.id}: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Failed to download file.")
