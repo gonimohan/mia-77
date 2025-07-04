@@ -42,7 +42,7 @@ def get_total_analyses_run() -> Optional[int]:
         logger.warning("KPI: Could not retrieve count of completed analyses.")
         return 0 # Default to 0 if count is None but no error
     except Exception as e:
-        logger.error(f"KPI Error: Failed to get total analyses run: {e}")
+        logger.error(f"KPI Error: Failed to get total analyses run: {e}\n{traceback.format_exc()}")
         return None
 
 def get_total_documents_processed() -> Optional[int]:
@@ -59,7 +59,7 @@ def get_total_documents_processed() -> Optional[int]:
         logger.warning("KPI: Could not retrieve count of processed documents.")
         return 0 # Default to 0 if count is None but no error
     except Exception as e:
-        logger.error(f"KPI Error: Failed to get total documents processed: {e}")
+        logger.error(f"KPI Error: Failed to get total documents processed: {e}\n{traceback.format_exc()}")
         return None
 
 def extract_kpis_from_analysis_state(state_data_json: str) -> Dict[str, Optional[int]]:
@@ -91,10 +91,10 @@ def extract_kpis_from_analysis_state(state_data_json: str) -> Dict[str, Optional
             kpis["num_opportunities"] = len(state_dict.get("opportunities", []))
 
         logger.info(f"KPI Extraction from state: Trends={kpis['num_trends']}, Opportunities={kpis['num_opportunities']}")
-    except json.JSONDecodeError:
-        logger.error("KPI Extraction: Failed to parse state_data_json.")
+    except json.JSONDecodeError as json_e:
+        logger.error(f"KPI Extraction: Failed to parse state_data_json. Error: {json_e}")
     except Exception as e:
-        logger.error(f"KPI Extraction: Error processing state data: {e}")
+        logger.error(f"KPI Extraction: Error processing state data: {e}\n{traceback.format_exc()}")
     return kpis
 
 # Example of how this might be used by the scheduled task (Sub-step 1.3)

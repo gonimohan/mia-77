@@ -32,9 +32,10 @@ CREATE TABLE IF NOT EXISTS reports (
     title VARCHAR(255) NOT NULL,
     market_domain VARCHAR(255) NOT NULL,
     query_text TEXT,
-    status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'processing', 'completed', 'failed'
-    report_data JSONB,
-    file_path TEXT,
+    status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'processing', 'completed', 'completed_with_warnings', 'failed'
+    report_data JSONB, -- Stores agent state_id, agent_query_response, error_message (if status is failed initially), chart_filenames, download_files
+    node_errors JSONB NULL, -- Stores list of node-specific errors if status is 'completed_with_warnings'
+    file_path TEXT, -- Path to the main markdown report file
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

@@ -151,7 +151,7 @@ def fetch_generic_url_content(endpoint_url: str, config: Dict[str, Any]) -> List
     except requests.exceptions.RequestException as e:
         logger.error(f"SyncHandler: Error fetching generic URL {endpoint_url}: {e}")
     except Exception as e:
-        logger.error(f"SyncHandler: Unexpected error processing generic URL {endpoint_url}: {e}")
+        logger.error(f"SyncHandler: Unexpected error processing generic URL {endpoint_url}: {e}\n{traceback.format_exc()}")
     return []
 
 
@@ -186,7 +186,7 @@ def fetch_newsapi_articles(config: Dict[str, Any], source_name_for_query: str) -
         logger.info(f"SyncHandler: Fetched {len(articles)} articles from NewsAPI for query '{query}'.")
         return articles
     except Exception as e:
-        logger.error(f"SyncHandler: Error fetching from NewsAPI: {e}")
+        logger.error(f"SyncHandler: Error fetching from NewsAPI: {e}\n{traceback.format_exc()}")
     return []
 
 
@@ -218,7 +218,7 @@ def fetch_tavily_search_results(config: Dict[str, Any], source_name_for_query: s
         logger.info(f"SyncHandler: Fetched {len(articles)} results from Tavily for query '{query}'.")
         return articles
     except Exception as e:
-        logger.error(f"SyncHandler: Error fetching from Tavily: {e}")
+        logger.error(f"SyncHandler: Error fetching from Tavily: {e}\n{traceback.format_exc()}")
     return []
 
 
