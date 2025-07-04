@@ -76,7 +76,7 @@ def test_generic_api(config: Dict[str, Any]) -> Tuple[bool, str, Optional[float]
     except Exception as e:
         end_time = time.time()
         response_time_ms = (end_time - start_time) * 1000
-        logger.error(f"Unexpected error testing generic API {endpoint}: {e}")
+        logger.error(f"Unexpected error testing generic API {endpoint}: {e}\n{traceback.format_exc()}")
         return False, f"An unexpected error occurred: {str(e)}", response_time_ms
 
 
@@ -106,7 +106,7 @@ def test_tavily_connection(config: Dict[str, Any]) -> Tuple[bool, str, Optional[
     except Exception as e:
         end_time = time.time()
         response_time_ms = (end_time - start_time) * 1000
-        logger.error(f"Tavily connection test error: {e}")
+        logger.error(f"Tavily connection test error: {e}\n{traceback.format_exc()}")
         return False, f"Tavily API connection failed: {str(e)}", response_time_ms
 
 def test_newsapi_connection(config: Dict[str, Any]) -> Tuple[bool, str, Optional[float]]:
@@ -135,7 +135,7 @@ def test_newsapi_connection(config: Dict[str, Any]) -> Tuple[bool, str, Optional
     except Exception as e:
         end_time = time.time()
         response_time_ms = (end_time - start_time) * 1000
-        logger.error(f"NewsAPI connection test error: {e}")
+        logger.error(f"NewsAPI connection test error: {e}\n{traceback.format_exc()}")
         return False, f"NewsAPI connection failed: {str(e)}", response_time_ms
 
 def test_google_gemini_connection(config: Dict[str, Any]) -> Tuple[bool, str, Optional[float]]:
@@ -172,7 +172,7 @@ def test_google_gemini_connection(config: Dict[str, Any]) -> Tuple[bool, str, Op
     except Exception as e:
         end_time = time.time()
         response_time_ms = (end_time - start_time) * 1000
-        logger.error(f"Google Gemini connection test error: {e}")
+        logger.error(f"Google Gemini connection test error: {e}\n{traceback.format_exc()}")
         return False, f"Google Gemini API connection failed: {str(e)}", response_time_ms
 
 

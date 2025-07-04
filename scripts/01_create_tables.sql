@@ -32,9 +32,10 @@ CREATE TABLE IF NOT EXISTS reports (
     title VARCHAR(255) NOT NULL,
     market_domain VARCHAR(255) NOT NULL,
     query_text TEXT,
-    status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'processing', 'completed', 'failed'
-    report_data JSONB,
-    file_path TEXT,
+    status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'processing', 'completed', 'completed_with_warnings', 'failed'
+    report_data JSONB, -- Stores agent state_id, agent_query_response, error_message (if status is failed initially), chart_filenames, download_files
+    node_errors JSONB NULL, -- Stores list of node-specific errors if status is 'completed_with_warnings'
+    file_path TEXT, -- Path to the main markdown report file
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -125,3 +126,26 @@ CREATE INDEX IF NOT EXISTS idx_reports_user_id ON reports(user_id);
 CREATE INDEX IF NOT EXISTS idx_kpi_metrics_user_id ON kpi_metrics(user_id);
 CREATE INDEX IF NOT EXISTS idx_market_trends_user_id ON market_trends(user_id);
 CREATE INDEX IF NOT EXISTS idx_competitors_user_id ON competitors(user_id);
+
+-- User Preferences table (for settings page)
+CREATE TABLE IF NOT EXISTS user_preferences (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE NOT NULL UNIQUE, -- Each user has one row
+    theme_settings JSONB,
+    notification_settings JSONB,
+    data_settings JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_user_preferences_user_id ON user_preferences(user_id);
+
+-- Application Settings table (for global app config)
+CREATE TABLE IF NOT EXISTS app_settings (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    setting_key VARCHAR(255) UNIQUE NOT NULL,
+    setting_value JSONB NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_app_settings_setting_key ON app_settings(setting_key);

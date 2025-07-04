@@ -280,6 +280,7 @@ class MarketIntelligenceState(BaseModel):
     num_trends: Optional[int] = None
     num_opportunities: Optional[int] = None
     uploaded_document_ids: Optional[List[str]] = None # For passing IDs of pre-uploaded docs
+    node_errors: List[Dict[str, str]] = Field(default_factory=list) # To track errors from individual nodes
 
     @field_validator("market_domain")
     @classmethod
@@ -1134,7 +1135,12 @@ async def trend_analyzer(current_state: MarketIntelligenceState) -> Dict[str, An
         else:
             logger.warning(f"Trend Analyzer: Parsed trends not a list of dicts for state {current_state.state_id}. Using default. LLM Output: {llm_output_string[:200]}")
             current_state.market_trends = default_trends_list
-            current_state.num_trends = len(default_trends_list) # Or 0 if default is empty and means "no trends found"
+            current_state.num_trends = len(default_trends_list)
+            current_state.node_errors.append({
+                "node": "trend_analyzer",
+                "error": "Parsed trends not a list of dicts or LLM output parsing failed.",
+                "details": llm_output_string[:200] # Log snippet of problematic output
+            })
 
         if current_state.report_dir:
             trends_json_path = os.path.join(current_state.report_dir, "market_trends.json")
@@ -1150,9 +1156,13 @@ async def trend_analyzer(current_state: MarketIntelligenceState) -> Dict[str, An
     except ValueError as ve:
         error_logger.error(f"Trend Analyzer: Value error for state {current_state.state_id} (possibly API key issue): {ve}\n{traceback.format_exc()}")
         current_state.market_trends = default_trends_list
+        current_state.num_trends = len(default_trends_list)
+        current_state.node_errors.append({"node": "trend_analyzer", "error": f"ValueError: {str(ve)}", "details": traceback.format_exc(limit=2)})
     except Exception as e_trend:
         error_logger.error(f"Trend Analyzer: Failed for state {current_state.state_id} ('{current_state.market_domain}'): {e_trend}\n{traceback.format_exc()}")
         current_state.market_trends = default_trends_list
+        current_state.num_trends = len(default_trends_list)
+        current_state.node_errors.append({"node": "trend_analyzer", "error": f"Exception: {str(e_trend)}", "details": traceback.format_exc(limit=2)})
     save_state(current_state)
     logger.info(f"Trend Analyzer: Node completed for state {current_state.state_id}.")
     return current_state.model_dump()
@@ -1192,7 +1202,12 @@ async def opportunity_identifier(current_state: MarketIntelligenceState) -> Dict
         else:
             logger.warning(f"Opportunity Identifier: Parsed opportunities not a list of dicts for state {current_state.state_id}. Using default. LLM Output: {llm_output[:200]}")
             current_state.opportunities = default_ops
-            current_state.num_opportunities = len(default_ops) # Or 0 if default is empty
+            current_state.num_opportunities = len(default_ops)
+            current_state.node_errors.append({
+                "node": "opportunity_identifier",
+                "error": "Parsed opportunities not a list of dicts or LLM output parsing failed.",
+                "details": llm_output[:200]
+            })
 
         if current_state.report_dir:
             opportunities_json_path = os.path.join(current_state.report_dir, "opportunities.json")
@@ -1208,9 +1223,13 @@ async def opportunity_identifier(current_state: MarketIntelligenceState) -> Dict
     except ValueError as ve:
         error_logger.error(f"Opportunity Identifier: Value error for state {current_state.state_id} (possibly API key issue): {ve}\n{traceback.format_exc()}")
         current_state.opportunities = default_ops
+        current_state.num_opportunities = len(default_ops)
+        current_state.node_errors.append({"node": "opportunity_identifier", "error": f"ValueError: {str(ve)}", "details": traceback.format_exc(limit=2)})
     except Exception as e:
         error_logger.error(f"Opportunity Identifier: Failed for state {current_state.state_id}: {e}\n{traceback.format_exc()}")
         current_state.opportunities = default_ops
+        current_state.num_opportunities = len(default_ops)
+        current_state.node_errors.append({"node": "opportunity_identifier", "error": f"Exception: {str(e)}", "details": traceback.format_exc(limit=2)})
     save_state(current_state)
     logger.info(f"Opportunity Identifier: Found {len(current_state.opportunities)} opportunities for state {current_state.state_id}.")
     return current_state.model_dump()
@@ -1243,8 +1262,16 @@ async def strategy_recommender(current_state: MarketIntelligenceState) -> Dict[s
         parsed_strats = llm_json_parser_robust(llm_output, default_return_val=default_strats)
         if not isinstance(parsed_strats, list) or not all(isinstance(s, dict) for s in parsed_strats):
             logger.warning(f"Strategy Recommender: Parsed strategies not a list of dicts for state {current_state.state_id}. Using default. Output: {llm_output[:200]}")
-            parsed_strats = default_strats
-        current_state.strategic_recommendations = parsed_strats
+            current_state.strategic_recommendations = default_strats
+            current_state.node_errors.append({
+                "node": "strategy_recommender",
+                "error": "Parsed strategies not a list of dicts or LLM output parsing failed.",
+                "details": llm_output[:200]
+            })
+        else:
+            current_state.strategic_recommendations = parsed_strats
+            logger.info(f"Strategy Recommender: Successfully parsed {len(parsed_strats)} strategies for state {current_state.state_id}.")
+
         if current_state.report_dir:
             strategies_json_path = os.path.join(current_state.report_dir, "strategies.json")
             try:
@@ -1259,9 +1286,11 @@ async def strategy_recommender(current_state: MarketIntelligenceState) -> Dict[s
     except ValueError as ve:
         error_logger.error(f"Strategy Recommender: Value error for state {current_state.state_id} (possibly API key issue): {ve}\n{traceback.format_exc()}")
         current_state.strategic_recommendations = default_strats
+        current_state.node_errors.append({"node": "strategy_recommender", "error": f"ValueError: {str(ve)}", "details": traceback.format_exc(limit=2)})
     except Exception as e:
         error_logger.error(f"Strategy Recommender: Failed for state {current_state.state_id}: {e}\n{traceback.format_exc()}")
         current_state.strategic_recommendations = default_strats
+        current_state.node_errors.append({"node": "strategy_recommender", "error": f"Exception: {str(e)}", "details": traceback.format_exc(limit=2)})
     save_state(current_state)
     logger.info(f"Strategy Recommender: Generated {len(current_state.strategic_recommendations)} strategies for state {current_state.state_id}.")
     return current_state.model_dump()
@@ -1292,8 +1321,16 @@ async def customer_insights_generator(current_state: MarketIntelligenceState) ->
         parsed_insights = llm_json_parser_robust(llm_output, default_return_val=default_insights)
         if not isinstance(parsed_insights, list) or not all(isinstance(i, dict) for i in parsed_insights):
             logger.warning(f"Customer Insights Generator: Parsed insights not a list of dicts for state {current_state.state_id}. Using default. Output: {llm_output[:200]}")
-            parsed_insights = default_insights
-        current_state.customer_insights = parsed_insights
+            current_state.customer_insights = default_insights
+            current_state.node_errors.append({
+                "node": "customer_insights_generator",
+                "error": "Parsed insights not a list of dicts or LLM output parsing failed.",
+                "details": llm_output[:200]
+            })
+        else:
+            current_state.customer_insights = parsed_insights
+            logger.info(f"Customer Insights Generator: Successfully parsed {len(parsed_insights)} customer segments for state {current_state.state_id}.")
+
         if current_state.report_dir:
             insights_json_path = os.path.join(current_state.report_dir, "customer_insights.json")
             try:
@@ -1329,9 +1366,11 @@ async def customer_insights_generator(current_state: MarketIntelligenceState) ->
     except ValueError as ve:
         error_logger.error(f"Customer Insights Generator: Value error for state {current_state.state_id} (possibly API key issue): {ve}\n{traceback.format_exc()}")
         current_state.customer_insights = default_insights
+        current_state.node_errors.append({"node": "customer_insights_generator", "error": f"ValueError: {str(ve)}", "details": traceback.format_exc(limit=2)})
     except Exception as e:
         error_logger.error(f"Customer Insights Generator: Failed for state {current_state.state_id}: {e}\n{traceback.format_exc()}")
         current_state.customer_insights = default_insights
+        current_state.node_errors.append({"node": "customer_insights_generator", "error": f"Exception: {str(e)}", "details": traceback.format_exc(limit=2)})
     save_state(current_state)
     logger.info(f"Customer Insights Generator: Node completed for state {current_state.state_id}.")
     return current_state.model_dump()
@@ -1363,9 +1402,11 @@ async def report_template_generator(current_state: MarketIntelligenceState) -> D
     except ValueError as ve:
         error_logger.error(f"Report Template Generator: Value error for state {current_state.state_id} (possibly API key issue): {ve}\n{traceback.format_exc()}")
         current_state.report_template = default_tmpl
+        current_state.node_errors.append({"node": "report_template_generator", "error": f"ValueError: {str(ve)}", "details": traceback.format_exc(limit=2)})
     except Exception as e:
         error_logger.error(f"Report Template Generator: Failed for state {current_state.state_id}: {e}\n{traceback.format_exc()}")
         current_state.report_template = default_tmpl
+        current_state.node_errors.append({"node": "report_template_generator", "error": f"Exception: {str(e)}", "details": traceback.format_exc(limit=2)})
     save_state(current_state)
     logger.info(f"Report Template Generator: Template length {len(current_state.report_template or '')} for state {current_state.state_id}.")
     return current_state.model_dump()
@@ -1417,6 +1458,7 @@ async def setup_vector_store(current_state: MarketIntelligenceState) -> Dict[str
     except Exception as e_vs:
         error_logger.error(f"Vector Store Setup: Failed to create vector store: {e_vs}\n{traceback.format_exc()}")
         current_state.vector_store_path = None
+        current_state.node_errors.append({"node": "setup_vector_store", "error": f"Exception: {str(e_vs)}", "details": traceback.format_exc(limit=2)})
     save_state(current_state)
     logger.info("Vector Store Setup: Node completed.")
     return current_state.model_dump()
@@ -1465,9 +1507,11 @@ async def rag_query_handler(current_state: MarketIntelligenceState) -> Dict[str,
     except ValueError as ve:
         error_logger.error(f"RAG Query Handler: Value error for state {current_state.state_id} (possibly API key issue): {ve}\n{traceback.format_exc()}")
         current_state.query_response = f"Error processing question due to configuration: {str(ve)}"
+        current_state.node_errors.append({"node": "rag_query_handler", "error": f"ValueError: {str(ve)}", "details": traceback.format_exc(limit=2)})
     except Exception as e_rag:
         error_logger.error(f"RAG Query Handler: Failed to process question '{current_state.question}' for state {current_state.state_id}: {e_rag}\n{traceback.format_exc()}")
         current_state.query_response = f"Error processing question: {str(e_rag)}"
+        current_state.node_errors.append({"node": "rag_query_handler", "error": f"Exception: {str(e_rag)}", "details": traceback.format_exc(limit=2)})
     save_state(current_state)
     logger.info(f"RAG Query Handler: Node completed for state {current_state.state_id}.")
     return current_state.model_dump()
@@ -1586,6 +1630,7 @@ def generate_charts(current_state: MarketIntelligenceState) -> Dict[str, Any]:
         logger.info(f"Chart Generator: Generated {len(current_state.chart_paths)} charts.")
     except Exception as e_chart:
         error_logger.error(f"Chart Generator: Failed to generate charts: {e_chart}\n{traceback.format_exc()}")
+        current_state.node_errors.append({"node": "generate_charts", "error": f"Exception: {str(e_chart)}", "details": traceback.format_exc(limit=2)})
     save_state(current_state)
     return current_state.model_dump()
 
@@ -1685,6 +1730,7 @@ async def final_report_generator(current_state: MarketIntelligenceState) -> Dict
 
     except Exception as e_report:
         error_logger.error(f"Final Report Generator: Failed to generate report: {e_report}\n{traceback.format_exc()}")
+        current_state.node_errors.append({"node": "final_report_generator", "error": f"Exception: {str(e_report)}", "details": traceback.format_exc(limit=2)})
     save_state(current_state)
     logger.info("Final Report Generator: Node completed.")
     return current_state.model_dump()
@@ -1805,10 +1851,11 @@ async def run_market_intelligence_agent(
             "rag_log_filename": "market_intelligence_errors.log",
             "vector_store_dirname": os.path.basename(final_state.vector_store_path) if final_state.vector_store_path else None,
             "query_response": final_state.query_response,
-            "download_files": final_state.download_files
+            "download_files": final_state.download_files,
+            "node_errors": final_state.node_errors # Include node-specific errors
         }
 
-        logger.info(f"Agent Run: Successfully completed for StateID '{final_state.state_id}'")
+        logger.info(f"Agent Run: Successfully completed for StateID '{final_state.state_id}'. Node errors encountered: {len(final_state.node_errors)}")
         return return_data
 
     except Exception as e_agent_run:

@@ -69,7 +69,7 @@ def extract_text_from_pdf(file_path: str) -> Tuple[Optional[str], int]:
 
         return full_text, word_count
     except Exception as e:
-        logger.error(f"Error extracting text from PDF {file_path}: {e}")
+        logger.error(f"Error extracting text from PDF {file_path}: {e}\n{traceback.format_exc()}")
         return None, 0
 
 
@@ -104,7 +104,7 @@ def extract_text_from_docx(file_path: str) -> Tuple[Optional[str], int]:
         full_text = "\n\n".join(text_content)
         return full_text, count_words(full_text)
     except Exception as e:
-        logger.error(f"Error extracting text from DOCX {file_path}: {e}")
+        logger.error(f"Error extracting text from DOCX {file_path}: {e}\n{traceback.format_exc()}")
         return None, 0
 
 
@@ -115,7 +115,7 @@ def extract_text_from_txt(file_path: str) -> Tuple[Optional[str], int]:
             full_text = f.read()
         return full_text, count_words(full_text)
     except Exception as e:
-        logger.error(f"Error extracting text from TXT {file_path}: {e}")
+        logger.error(f"Error extracting text from TXT {file_path}: {e}\n{traceback.format_exc()}")
         return None, 0
 
 
@@ -157,7 +157,7 @@ def extract_text_from_csv(file_path: str) -> Tuple[Optional[str], int]:
         full_text = "\n".join(text_content)
         return full_text, count_words(full_text)
     except Exception as e:
-        logger.error(f"Error extracting text from CSV {file_path}: {e}")
+        logger.error(f"Error extracting text from CSV {file_path}: {e}\n{traceback.format_exc()}")
         return None, 0
 
 
@@ -209,7 +209,7 @@ def extract_text_from_excel(file_path: str) -> Tuple[Optional[str], int]:
         full_text = "\n\n".join(all_sheets_text)
         return full_text, count_words(full_text)
     except Exception as e:
-        logger.error(f"Error extracting text from Excel {file_path}: {e}")
+        logger.error(f"Error extracting text from Excel {file_path}: {e}\n{traceback.format_exc()}")
         return None, 0
 
 
@@ -266,10 +266,10 @@ def extract_text_from_file(
             logger.info(f"Successfully extracted {word_count} words from {file_path_str}.")
             return {"text": extracted_text, "word_count": word_count, "metadata": metadata}
         else:
-            logger.error(f"Failed to extract text from {file_path_str}.")
+            logger.error(f"Failed to extract text from {file_path_str} (extracted_text is None).") # Added detail
             return None
     except Exception as e:
-        logger.error(f"Unexpected error during text extraction from {file_path_str}: {e}")
+        logger.error(f"Unexpected error during text extraction from {file_path_str}: {e}\n{traceback.format_exc()}")
         return None
 
 

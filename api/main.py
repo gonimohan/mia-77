@@ -361,9 +361,16 @@ from api import agent_logic # Adjusted for clarity if main.py is run from outsid
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Global exception: {str(exc)}\n{traceback.format_exc()}")
+    # For production, avoid sending raw exception details to the client for 500 errors.
+    # In a dev environment, str(exc) can be useful. Consider an env flag for this.
+    # For now, let's make it generic for 500.
+    client_detail_message = "An unexpected error occurred on the server. Please try again later."
+    if os.getenv("ENVIRONMENT") == "development": # Example: show more detail in dev
+        client_detail_message = str(exc)
+
     return JSONResponse(
         status_code=500,
-        content={"error": "Internal server error", "details": str(exc), "timestamp": datetime.now().isoformat()},
+        content={"error": "Internal Server Error", "details": client_detail_message, "timestamp": datetime.now(dt_timezone.utc).isoformat()},
     )
 
 
@@ -408,60 +415,85 @@ async def analyze(analysis_request: AnalysisRequest, user=Depends(get_current_us
             uploaded_document_ids=analysis_request.uploaded_file_ids
         )
 
-        report_status = "completed" if agent_result.get("success") else "failed"
+        node_errors = agent_result.get("node_errors", [])
+        is_successful_run = agent_result.get("success", False) # Overall pipeline success
+
+        if not is_successful_run:
+            report_status = "failed"
+        elif node_errors: # Successful run but with partial errors
+            report_status = "completed_with_warnings"
+            logger.warning(f"Agent run {agent_result.get('state_id')} for user {user.id} completed with node errors: {node_errors}")
+        else: # Successful run with no node errors
+            report_status = "completed"
+
         report_file_path = None
-        if agent_result.get("success") and agent_result.get("report_dir_relative") and agent_result.get("report_filename"):
-            # Construct a conceptual path. Actual storage/retrieval might differ.
+        if is_successful_run and agent_result.get("report_dir_relative") and agent_result.get("report_filename"):
             report_file_path = f"{agent_result.get('report_dir_relative')}/{agent_result.get('report_filename')}"
         
         report_title = f"Analysis for '{analysis_request.query}' in '{analysis_request.market_domain}'"
 
-        # Store a reference in the 'reports' table
         if supabase:
             report_record = {
                 "user_id": str(user.id),
-                "title": report_title[:255], # Ensure title fits in VARCHAR(255)
+                "title": report_title[:255],
                 "market_domain": analysis_request.market_domain,
                 "query_text": analysis_request.query,
                 "status": report_status,
-                "report_data": { # Store key results or references
+                "report_data": {
                     "state_id": agent_result.get("state_id"),
                     "agent_query_response": agent_result.get("query_response"),
-                    "error_message": agent_result.get("error") if not agent_result.get("success") else None,
+                    # Main error if pipeline failed, or null if success/warnings
+                    "error_message": agent_result.get("error") if not is_successful_run else None,
                     "chart_filenames": agent_result.get("chart_filenames"),
                     "download_files": agent_result.get("download_files")
                 },
-                "file_path": report_file_path, # Path to the main markdown report
-                # created_at and updated_at will be set by DB defaults
+                "node_errors": node_errors if node_errors else None, # Store node_errors list
+                "file_path": report_file_path,
             }
             try:
                 insert_op = supabase.table("reports").insert(report_record).execute()
                 if insert_op.data:
-                    logger.info(f"Report record stored in Supabase 'reports' table with ID: {insert_op.data[0]['id']}")
-                    # Return the agent_result which includes state_id etc.
-                    # The frontend might use state_id to later fetch report details or files.
+                    logger.info(f"Report record (status: {report_status}) stored in Supabase 'reports' table with ID: {insert_op.data[0]['id']}")
                     return {
-                        "success": agent_result.get("success"),
-                        "message": "Analysis processing initiated." if agent_result.get("success") else "Analysis processing failed.",
+                        "success": is_successful_run,
+                        "message": "Analysis processing completed." if is_successful_run else "Analysis processing failed.",
+                        "status": report_status, # Include the detailed status
                         "state_id": agent_result.get("state_id"),
-                        "report_db_id": insert_op.data[0]['id'], # ID from 'reports' table
-                        "details": agent_result # Full agent result for client if needed
+                        "report_db_id": insert_op.data[0]['id'],
+                        "node_errors": node_errors, # Include in response
+                        "details": agent_result
                     }
                 else:
-                    logger.error(f"Failed to store report record in Supabase 'reports' table: {insert_op.error.message if insert_op.error else 'Unknown error'}")
-                    # Even if DB store fails, the agent might have run. Return agent status.
-                    # Or raise an error if this DB store is critical for the flow.
-                    # For now, log error and proceed with agent result.
-                    # Fall through to return agent_result directly but log the DB error.
+                    db_error_msg = insert_op.error.message if insert_op.error else 'Unknown DB error during report insert'
+                    logger.error(f"Failed to store report record in Supabase 'reports' table: {db_error_msg}")
+                    # Return agent result but indicate DB save issue
+                    return {
+                        "success": is_successful_run,
+                        "message": f"Analysis processing completed (status: {report_status}), but failed to save report metadata to database: {db_error_msg}",
+                        "status": report_status,
+                        "state_id": agent_result.get("state_id"),
+                        "node_errors": node_errors,
+                        "details": agent_result
+                    }
             except Exception as db_error:
                 logger.error(f"Exception storing report record to Supabase 'reports': {db_error}\n{traceback.format_exc()}")
-                # Fall through to return agent_result, but with a warning about DB persistence.
+                return {
+                    "success": is_successful_run,
+                    "message": f"Analysis processing completed (status: {report_status}), but encountered an exception saving report metadata.",
+                    "status": report_status,
+                    "state_id": agent_result.get("state_id"),
+                    "node_errors": node_errors,
+                    "details": agent_result
+                }
 
-        # Fallback return if Supabase interaction failed but agent ran
+        # Fallback if Supabase client is not available (should not happen if startup is correct)
+        logger.warning("Supabase client not available when trying to store report record.")
         return {
-            "success": agent_result.get("success"),
-            "message": "Analysis processing completed but report metadata might not have been saved.",
+            "success": is_successful_run,
+            "message": "Analysis processing completed, but Supabase client was not available to save report metadata.",
+            "status": report_status,
             "state_id": agent_result.get("state_id"),
+            "node_errors": node_errors,
             "details": agent_result
         }
 
@@ -482,7 +514,10 @@ async def analyze(analysis_request: AnalysisRequest, user=Depends(get_current_us
              except Exception as db_e_on_fail:
                  logger.error(f"Failed to store error report: {db_e_on_fail}")
 
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+        client_error_detail = "Analysis failed due to an internal server error."
+        if os.getenv("ENVIRONMENT") == "development":
+            client_error_detail = f"Analysis failed: {str(e)}"
+        raise HTTPException(status_code=500, detail=client_error_detail)
 
 
 @app.get("/api/reports", response_model=List[Dict[str, Any]])
@@ -525,7 +560,10 @@ async def list_reports_for_user(user=Depends(get_current_user), limit: int = 50,
 
     except Exception as e:
         logger.error(f"Error listing reports for user {user.id}: {str(e)}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Failed to list reports: {str(e)}")
+        client_error_detail = "Failed to list reports due to an internal server error."
+        if os.getenv("ENVIRONMENT") == "development":
+            client_error_detail = f"Failed to list reports: {str(e)}"
+        raise HTTPException(status_code=500, detail=client_error_detail)
 
 
 @app.post("/api/chat")
@@ -568,8 +606,11 @@ async def chat(chat_request: ChatRequest, user=Depends(get_current_user)):  # Ad
 
         return response
     except Exception as e:
-        logger.error(f"Chat error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Chat processing failed: {str(e)}")
+        logger.error(f"Chat error: {str(e)}\n{traceback.format_exc()}") # Added traceback
+        client_error_detail = "Chat processing failed due to an internal server error."
+        if os.getenv("ENVIRONMENT") == "development":
+            client_error_detail = f"Chat processing failed: {str(e)}"
+        raise HTTPException(status_code=500, detail=client_error_detail)
 
 
 async def process_document_pipeline(
@@ -1025,8 +1066,11 @@ async def get_data_sources(user=Depends(get_current_user)):
         return result.data
 
     except Exception as e:
-        logger.error(f"Data sources fetch error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch data sources: {str(e)}")
+        logger.error(f"Data sources fetch error: {str(e)}\n{traceback.format_exc()}")
+        client_error_detail = "Failed to fetch data sources due to an internal server error."
+        if os.getenv("ENVIRONMENT") == "development":
+            client_error_detail = f"Failed to fetch data sources: {str(e)}"
+        raise HTTPException(status_code=500, detail=client_error_detail)
 
 
 @app.post("/api/data-sources")
@@ -1052,8 +1096,11 @@ async def create_data_source(data_source: DataSource, user=Depends(get_current_u
         return result.data[0]
 
     except Exception as e:
-        logger.error(f"Data source creation error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to create data source: {str(e)}")
+        logger.error(f"Data source creation error: {str(e)}\n{traceback.format_exc()}")
+        client_error_detail = "Failed to create data source due to an internal server error."
+        if os.getenv("ENVIRONMENT") == "development":
+            client_error_detail = f"Failed to create data source: {str(e)}"
+        raise HTTPException(status_code=500, detail=client_error_detail)
 
 
 @app.put("/api/data-sources/{source_id}")
@@ -1083,8 +1130,11 @@ async def update_data_source(source_id: str, data_source: DataSource, user=Depen
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Data source update error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to update data source: {str(e)}")
+        logger.error(f"Data source update error: {str(e)}\n{traceback.format_exc()}")
+        client_error_detail = "Failed to update data source due to an internal server error."
+        if os.getenv("ENVIRONMENT") == "development":
+            client_error_detail = f"Failed to update data source: {str(e)}"
+        raise HTTPException(status_code=500, detail=client_error_detail)
 
 
 @app.delete("/api/data-sources/{source_id}")
@@ -1104,8 +1154,11 @@ async def delete_data_source(source_id: str, user=Depends(get_current_user)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Data source deletion error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete data source: {str(e)}")
+        logger.error(f"Data source deletion error: {str(e)}\n{traceback.format_exc()}")
+        client_error_detail = "Failed to delete data source due to an internal server error."
+        if os.getenv("ENVIRONMENT") == "development":
+            client_error_detail = f"Failed to delete data source: {str(e)}"
+        raise HTTPException(status_code=500, detail=client_error_detail)
 
 
 @app.post("/api/data-sources/{source_id}/test")
@@ -1169,8 +1222,11 @@ async def test_data_source(source_id: str, user=Depends(get_current_user)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Data source test error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Data source test failed: {str(e)}")
+        logger.error(f"Data source test error: {str(e)}\n{traceback.format_exc()}")
+        client_error_detail = "Data source test failed due to an internal server error."
+        if os.getenv("ENVIRONMENT") == "development":
+            client_error_detail = f"Data source test failed: {str(e)}"
+        raise HTTPException(status_code=500, detail=client_error_detail)
 
 
 @app.post("/api/data-sources/{source_id}/sync")
@@ -1267,12 +1323,15 @@ async def sync_data_source(source_id: str, user=Depends(get_current_user)):
         raise
     except Exception as e:
         logger.error(f"Data source sync error for source ID {source_id}: {str(e)}\n{traceback.format_exc()}")
-        supabase.table("data_sources").update({
+        supabase.table("data_sources").update({ # Ensure status is updated on generic error too
             "status": "error",
-            "last_test_error": f"Sync failed: {str(e)[:200]}", # Use last_test_error to store sync error too
+            "last_test_error": f"Sync failed: {str(e)[:200]}",
             "updated_at": datetime.now(dt_timezone.utc).isoformat()
         }).eq("id", source_id).execute()
-        raise HTTPException(status_code=500, detail=f"Data source sync failed: {str(e)}")
+        client_error_detail = "Data source sync failed due to an internal server error."
+        if os.getenv("ENVIRONMENT") == "development":
+            client_error_detail = f"Data source sync failed: {str(e)}"
+        raise HTTPException(status_code=500, detail=client_error_detail)
 
 
 @app.get("/api/documents/search")
@@ -1332,8 +1391,13 @@ async def search_documents(
         }
         
     except Exception as e:
-        logger.error(f"Error updating user profile for {user_id_str}: {e}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Failed to update profile: {str(e)}")
+        logger.error(f"Error during document search: {e}\n{traceback.format_exc()}")
+        client_error_detail = "Failed to search documents due to an internal server error."
+        if os.getenv("ENVIRONMENT") == "development":
+            client_error_detail = f"Failed to search documents: {str(e)}"
+        raise HTTPException(status_code=500, detail=client_error_detail)
+        # The original code had a copy-paste error here, logging "Error updating user profile"
+        # Corrected to "Error during document search"
 
 
 # User Preferences Endpoints
@@ -1463,7 +1527,10 @@ async def update_user_profile(profile_update: UserProfileUpdateRequest, user=Dep
         raise
     except Exception as e:
         logger.error(f"Exception during user profile update for {user_id_str}: {e}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Failed to update profile due to an internal error: {str(e)}")
+        client_error_detail = "Failed to update profile due to an internal server error."
+        if os.getenv("ENVIRONMENT") == "development":
+            client_error_detail = f"Failed to update profile: {str(e)}"
+        raise HTTPException(status_code=500, detail=client_error_detail)
 
 
 # Application Settings Endpoints
@@ -1695,7 +1762,10 @@ async def get_kpi(timeframe: str = "latest", category: str = "all", user=Depends
 
     except Exception as e:
         logger.error(f"KPI GET error: {str(e)}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"KPI fetch failed: {str(e)}")
+        client_error_detail = "KPI fetch failed due to an internal server error."
+        if os.getenv("ENVIRONMENT") == "development":
+            client_error_detail = f"KPI fetch failed: {str(e)}"
+        raise HTTPException(status_code=500, detail=client_error_detail)
 
 
 @app.post("/api/kpi", dependencies=[Depends(get_current_user)]) # Added auth
@@ -1752,7 +1822,10 @@ async def store_kpi(request: KPIRequest, user=Depends(get_current_user)):
 
     except Exception as e:
         logger.error(f"KPI POST storage error: {str(e)}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"KPI storage failed: {str(e)}")
+        client_error_detail = "KPI storage failed due to an internal server error."
+        if os.getenv("ENVIRONMENT") == "development":
+            client_error_detail = f"KPI storage failed: {str(e)}"
+        raise HTTPException(status_code=500, detail=client_error_detail)
 
 
 @app.post("/api/agent/sync")
